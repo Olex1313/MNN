@@ -522,6 +522,7 @@ bool Cli::initializeMNNConvertArgs(modelConfig &modelPath, int argc, char **argv
         modelPath.saveExternalData = true;
     }
     if (result.count("transformerFuse")) {
+		std::cout << "transformer fuse option enabled" << std::endl;
         modelPath.transformerFuse = true;
     }
     if (result.count("groupConvNative")) {

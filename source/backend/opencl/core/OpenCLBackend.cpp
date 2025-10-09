@@ -1524,26 +1524,31 @@ void OpenCLBackend::setGpuMode(const int cl_mode_num) {
     totalSet = 0;
     isSet = (cl_mode_num & MNN_GPU_TUNING_NONE);
     if(isSet) {
+		std::cout << "MNN_GPU_TUNING_NONE enabled" << std::endl;
         mTuneLevel = None;
         totalSet++;
     }
     isSet = (cl_mode_num & MNN_GPU_TUNING_FAST);
     if(isSet) {
+		std::cout << "MNN_GPU_TUNING_FAST enabled" << std::endl;
         mTuneLevel = Fast;
         totalSet++;
     }
     isSet = (cl_mode_num & MNN_GPU_TUNING_NORMAL);
     if(isSet) {
+		std::cout << "MNN_GPU_TUNING_NORMAL enabled" << std::endl;
         mTuneLevel = Normal;
         totalSet++;
     }
     isSet = (cl_mode_num & MNN_GPU_TUNING_HEAVY);
     if(isSet) {
+		std::cout << "MNN_GPU_TUNING_HEAVY enabled" << std::endl;
         mTuneLevel = Heavy;
         totalSet++;
     }
     isSet = (cl_mode_num & MNN_GPU_TUNING_WIDE);
     if(isSet) {
+		std::cout << "MNN_GPU_TUNING_WIDE enabled" << std::endl;
         mTuneLevel = Wide;
         totalSet++;
     }
