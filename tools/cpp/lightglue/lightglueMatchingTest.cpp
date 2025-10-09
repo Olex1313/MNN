@@ -231,7 +231,7 @@ Matches matchPairMNN(Keypoints &kpts0, Keypoints &kpts1, const std::string &mode
 	std::tie(result.s0, sh2) = fetchOutput<float>(net.get(), sess, "s0");
 	std::tie(result.s1, sh3) = fetchOutput<float>(net.get(), sess, "s1");
 
-	for (int iter = 0; iter < 100; ++iter) {
+	for (int iter = 0; iter < 20; ++iter) {
 		auto t0 = std::chrono::steady_clock::now();
 		net->runSession(sess);
 		auto t1 = std::chrono::steady_clock::now();
@@ -257,5 +257,7 @@ int main(int argc, const char* argv[]) {
 
 	Matches matches = matchPairMNN(kpts0, kpts1, model_path);
 	std::cout << "detected " << matches.size() << " MNN matches" << std::endl;
+	if (matches.size() != 2676)
+		std::cerr << "matches number differ" << std::endl;
 	return 0;
 }
