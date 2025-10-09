@@ -6,6 +6,7 @@
 //  Copyright © 2018, Alibaba Group Holding Limited
 //
 #include <unordered_map>
+#include <iostream>
 
 #include "../TemplateMerge.hpp"
 #include "MNN/expr/ExprCreator.hpp"
@@ -22,6 +23,7 @@ private:
     VARP query, key, value, mask, sinks;
     bool kvcache;
     bool has_sinks;
+	bool has_mask;
 };
 
 static EXPRP is_gqa(EXPRP& x) {
@@ -115,27 +117,32 @@ FuseAttention::FuseAttention() {
         if (helpers::IsSelect(x)) {
             mask = x->inputs().at(0);
             x = x->inputs().at(1)->expr().first;
+			has_mask = true;
         } else if (helpers::IsBinaryAdd(x)) {
             mask = x->inputs().at(1);
             x = x->inputs().at(0)->expr().first;
+			has_mask = true;
         } else {
-            return false;
+            has_mask = false;
         }
 
         // div
         if (helpers::IsCast(x)) {
             x = x->inputs().at(0)->expr().first;
         }
-        if (!helpers::IsBinaryOp(x)) {
-            return false;
-        }
+		if (helpers::IsBinaryOp(x)) {
+			x = x->inputs().at(0)->expr().first;
+		}
+
         // q @ k
-        x = x->inputs().at(0)->expr().first;
         if (!helpers::IsMatMul(x)) {
             return false;
         }
         // transpose
         z = x->inputs().at(0)->expr().first;
+		if (helpers::IsBinaryOp(z)) {
+			z = z->inputs().at(0)->expr().first;
+		}
         if (!helpers::IsTranspose(z)) {
             return false;
         }
@@ -143,8 +150,11 @@ FuseAttention::FuseAttention() {
         query = z->inputs().at(0);
 
         y = x->inputs().at(1)->expr().first;
+		if (helpers::IsBinaryOp(y)) {
+			y = y->inputs().at(0)->expr().first;
+		}
         // transpose
-        y = is_gqa(y);
+//        y = is_gqa(y);
         if (!helpers::IsTranspose(y)) {
             return false;
         }
@@ -181,7 +191,10 @@ FuseAttention::FuseAttention() {
         param->kv_cache       = kvcache;
         attention->main.value = param;
 
-        VARPS inputs = {query, key, value, mask};
+        VARPS inputs = {query, key, value};
+		if (has_mask) {
+			inputs.push_back(mask);
+		}
         if (has_sinks) {
             inputs.push_back(sinks);
         }
