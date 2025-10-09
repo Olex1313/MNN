@@ -107,6 +107,8 @@ def build_deps():
         extra_opts += ' -DMNN_BUILD_TORCH=ON ' if USE_TORCH else ' '
         if USE_CUDA:
             extra_opts += ' -DMNN_CUDA=ON '
+            extra_opts += ' -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_STANDARD_REQUIRED=ON'
+            extra_opts += ' -DCMAKE_CUDA_STANDARD=17 -DCMAKE_CUDA_STANDARD_REQUIRED=ON'
             if USE_CUDA_TUNE:
                 extra_opts += ' -DMNN_CUDA_TUNE_PARAM=ON '
         extra_opts += ' ' if USE_SSE else ' -DMNN_USE_SSE=OFF '
