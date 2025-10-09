@@ -37,6 +37,9 @@ endif()
 add_executable(mobilenetTest.out ${CMAKE_CURRENT_LIST_DIR}/mobilenetTest.cpp )
 list(APPEND MNN_CPP_TOOLS mobilenetTest.out)
 
+add_executable(lightglueMatchingTest.out ${CMAKE_CURRENT_LIST_DIR}/lightglue/lightglueMatchingTest.cpp)
+list(APPEND MNN_CPP_TOOLS lightglueMatchingTest.out)
+
 add_executable(backendTest.out ${CMAKE_CURRENT_LIST_DIR}/backendTest.cpp)
 list(APPEND MNN_CPP_TOOLS backendTest.out)
 
