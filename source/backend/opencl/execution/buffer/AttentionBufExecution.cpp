@@ -466,6 +466,42 @@ int AttentionBufExecution::getLocalSize(int size, int maxGroupSize){
     return local_size;
 }
 
+ErrorCode AttentionBufExecution::flashAttnResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) {
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    auto shape   = inputs[0]->shape();
+    int batch    = shape[0];
+    int seqlen   = shape[1];
+    int numHead  = shape[2];
+    int headDim  = shape[3];
+    int kvSeqlen = inputs[1]->shape()[1];
+
+    std::set<std::string> opts;
+    opts.insert("-D D_HEAD=" + std::to_string(headDim));
+
+    mKernel_flash_attn = runtime->buildKernel(
+        "fav2_buf", "flash_attention_v2_mnn_fwd", opts, BackendConfig::Precision_High);
+
+    float scale = 1.0f / std::sqrt((float)headDim);
+    int idx = 0;
+    mKernel_flash_attn->get().setArg(idx++, openCLBuffer(inputs[0]));
+    mKernel_flash_attn->get().setArg(idx++, openCLBuffer(inputs[1]));
+    mKernel_flash_attn->get().setArg(idx++, openCLBuffer(inputs[2]));
+    mKernel_flash_attn->get().setArg(idx++, openCLBuffer(outputs[0]));
+    mKernel_flash_attn->get().setArg(idx++, batch);
+    mKernel_flash_attn->get().setArg(idx++, numHead);
+    mKernel_flash_attn->get().setArg(idx++, seqlen);
+    mKernel_flash_attn->get().setArg(idx++, kvSeqlen);
+    mKernel_flash_attn->get().setArg(idx++, scale);
+    mKernel_flash_attn->get().setArg(idx++, 0); // is_causal = false
+
+    constexpr int BLOCK_M = 32, WG = 32;
+    int num_q_blocks = (seqlen + BLOCK_M - 1) / BLOCK_M;
+    mGwsFA = {(uint32_t)(num_q_blocks * WG), (uint32_t)batch, (uint32_t)numHead};
+    mLwsFA = {(uint32_t)WG, 1u, 1u};
+
+    return NO_ERROR;
+}
+
 ErrorCode AttentionBufExecution::longPrefillResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs){
     
     auto query = inputs[0];
@@ -486,7 +522,14 @@ ErrorCode AttentionBufExecution::longPrefillResize(const std::vector<Tensor *> &
     mAlignKV = 32;
     mAlignHDK = 4;
     mAlignHDN = 32;
-    
+
+    // Flash attention path: bypass rearrange/GEMM/softmax pipeline
+    if (mFlashAttnEnabled) {
+        mUseFlashAttn = true;
+        return flashAttnResize(inputs, outputs);
+    }
+    mUseFlashAttn = false;
+
     float useMemorySize = 1.0 * ROUND_UP(seqlen, mAlignQ) / 1024.0 * ROUND_UP(seqlen, mAlignKV) / 1024.0 * batch * numHead;
     // elementSize larger than 32M
     if(useMemorySize > 32.0) {
@@ -1628,6 +1671,12 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
 int AttentionBufExecution::getExecuteTime(){
     int executeTime = 0;
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    if(mLongPrefill && mUseFlashAttn) {
+        std::cout << "use FA" << std::endl;
+        cl::Event event;
+        run3DKernelDefault(mKernel_flash_attn, mGwsFA, mLwsFA, runtime, &event);
+        return runtime->getEventTime(event);
+    }
     if(mLongPrefill) {
         int seq_idx = 0;
         cl::Event event0, event1, event2, event3, event4, event5, event6;
@@ -1744,8 +1793,10 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
 #endif
         return NO_ERROR;
     }
-    
     if(mLongPrefill) {
+        if(mUseFlashAttn) {
+            run3DKernelDefault(mKernel_flash_attn, mGwsFA, mLwsFA, mOpenCLBackend->getOpenCLRuntime());
+        } else {
         int seq_idx = 0;
         run3DKernelDefault(mKernel_rearrange_vec[seq_idx], mGwsRearrgVec[seq_idx], mLwsRearrgVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
         if(mHasMask) {
@@ -1756,10 +1807,11 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
             run3DKernelDefault(mKernel_softmax_vec[seq_idx], mGwsSoftMaxVec[seq_idx], mLwsSoftMaxVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
             run3DKernelDefault(mKernel_trans_vec[seq_idx], mGwsTransVec[seq_idx], mLwsTransVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
             run3DKernelDefault(mKernel_qkv_vec[seq_idx], mGwsQkvVec[seq_idx], mLwsQkvVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
-            
+
         }
         seq_idx = 0;
         run3DKernelDefault(mKernel_clip_vec[seq_idx], mGwsClipVec[seq_idx], mLwsClipVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
+        }
     } else{
         if(mIsDecode){
             run3DKernelDefault(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, mOpenCLBackend->getOpenCLRuntime());
@@ -1795,6 +1847,8 @@ AttentionBufExecution::AttentionBufExecution(const MNN::Op *op, Backend* backend
     auto kernel = mOpenCLBackend->getOpenCLRuntime()->buildKernel("softmax_buf", "softmax_buf", {"-DSOFTMAX_LOCAL_SIZE=512"}, mOpenCLBackend->getPrecision());
     mMeta = (KVMeta*)(mOpenCLBackend->getMetaPtr());
     mMaxWorkGroupSize = static_cast<uint32_t>(mOpenCLBackend->getOpenCLRuntime()->getMaxWorkGroupSize(kernel));
+    auto attnParam = op->main_as_AttentionParam();
+    mFlashAttnEnabled = (attnParam != nullptr) && attnParam->flash_attn_kernel();
 }
 
 AttentionBufExecution::AttentionBufExecution(std::shared_ptr<KVCacheCLManager> manager, const MNN::Op *op, Backend *backend) : CommonExecution(backend, op), mKVCacheCLManager(manager) {

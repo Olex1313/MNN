@@ -433,6 +433,34 @@ public:
                 return false;
             }
         }
+
+        // unit test 3: flash attention path (seq > 512, no kv_cache, no GQA)
+        // matches LightGlue attention node parameters: batch=1, numHead=4, kvNumHead=4, headDim=64
+        {
+            int savedNumHead = NumHead, savedKvNumHead = KvNumHead, savedHeadDim = HeadDim;
+            NumHead = 4; KvNumHead = 4; HeadDim = 64;
+            int seq_len = 600;
+
+            std::shared_ptr<NaiveAttention> naiveAttention(new NaiveAttention);
+            std::shared_ptr<MNN::OpT> attention(new MNN::OpT);
+            attention->type = MNN::OpType_Attention;
+            attention->main.type = MNN::OpParameter_AttentionParam;
+            attention->main.value = new MNN::AttentionParamT;
+            attention->main.AsAttentionParam()->kv_cache = false;
+            attention->main.AsAttentionParam()->flash_attn_kernel = true;
+
+            generateInput(seq_len, precision);
+            mask.clear();
+            expected_result = naiveAttention->onExecute(query, key, value, mask, seq_len);
+            Output = Variable::create(Expr::create(attention.get(), {Query, Key, Value}));
+            bool pass = compareResult(seq_len);
+
+            NumHead = savedNumHead; KvNumHead = savedKvNumHead; HeadDim = savedHeadDim;
+            if (!pass) {
+                printf("Error: Flash attention long prefill test failed!\n");
+                return false;
+            }
+        }
         return true;
     }
 };

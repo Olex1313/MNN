@@ -166,6 +166,9 @@ extern const char* roi_pooling;
 extern const char* depthwise_conv2d;
 extern const char* layernorm;
 #ifndef MNN_OPENCL_BUFFER_CLOSED
+extern const char* fav2_buf;
+#endif
+#ifndef MNN_OPENCL_BUFFER_CLOSED
 extern const char* gemm_conv1x1_buf;
 #endif
 extern const char* winogradTransformDest2_5_1;
@@ -339,6 +342,9 @@ const std::map<std::string, const char*> OpenCLProgramMap =
   { "depthwise_conv2d", depthwise_conv2d },
   { "layernorm", layernorm },
 #ifndef MNN_OPENCL_BUFFER_CLOSED
+  { "fav2_buf", fav2_buf },
+#endif
+#ifndef MNN_OPENCL_BUFFER_CLOSED
   { "gemm_conv1x1_buf", gemm_conv1x1_buf },
 #endif
   { "winogradTransformDest2_5_1", winogradTransformDest2_5_1 },
@@ -419,6 +425,7 @@ const std::map<std::string, std::string> OpenCLProgramMd5Map =
   { "roi_pooling", "ba4a81b7ec7058d14afb377c18674a76" },
   { "depthwise_conv2d", "a23dd590e0bdcdd60987e8bab5ed529f" },
   { "layernorm", "bd457b4bd4f3c57818bc17e073b09e74" },
+  { "fav2_buf", "bb49a03b2d40e9f2767855fe513a98c9" },
   { "gemm_conv1x1_buf", "020f536facd3b4e4b519b30d6bfc89a1" },
   { "winogradTransformDest2_5_1", "4f3d0d6b3e0ee7f0bff97acfbbdf653f" },
   { "cast_buf", "f39e5c1ca2fa4b39eac2af1c7934ba85" },

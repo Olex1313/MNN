@@ -2956,8 +2956,10 @@ flatbuffers::Offset<StringVec> CreateStringVec(flatbuffers::FlatBufferBuilder &_
 struct AttentionParamT : public flatbuffers::NativeTable {
   typedef AttentionParam TableType;
   bool kv_cache;
+  bool flash_attn_kernel;
   AttentionParamT()
-      : kv_cache(true) {
+      : kv_cache(true),
+        flash_attn_kernel(false) {
   }
 };
 
@@ -2969,9 +2971,13 @@ struct AttentionParam FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   bool kv_cache() const {
     return GetField<uint8_t>(4, 1) != 0;
   }
+  bool flash_attn_kernel() const {
+    return GetField<uint8_t>(6, 0) != 0;
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, 4) &&
+           VerifyField<uint8_t>(verifier, 6) &&
            verifier.EndTable();
   }
   AttentionParamT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2984,6 +2990,9 @@ struct AttentionParamBuilder {
   flatbuffers::uoffset_t start_;
   void add_kv_cache(bool kv_cache) {
     fbb_.AddElement<uint8_t>(4, static_cast<uint8_t>(kv_cache), 1);
+  }
+  void add_flash_attn_kernel(bool flash_attn_kernel) {
+    fbb_.AddElement<uint8_t>(6, static_cast<uint8_t>(flash_attn_kernel), 0);
   }
   explicit AttentionParamBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -2999,8 +3008,10 @@ struct AttentionParamBuilder {
 
 inline flatbuffers::Offset<AttentionParam> CreateAttentionParam(
     flatbuffers::FlatBufferBuilder &_fbb,
-    bool kv_cache = true) {
+    bool kv_cache = true,
+    bool flash_attn_kernel = false) {
   AttentionParamBuilder builder_(_fbb);
+  builder_.add_flash_attn_kernel(flash_attn_kernel);
   builder_.add_kv_cache(kv_cache);
   return builder_.Finish();
 }
@@ -5213,6 +5224,7 @@ inline void AttentionParam::UnPackTo(AttentionParamT *_o, const flatbuffers::res
   (void)_o;
   (void)_resolver;
   { auto _e = kv_cache(); _o->kv_cache = _e; };
+  { auto _e = flash_attn_kernel(); _o->flash_attn_kernel = _e; };
 }
 
 inline flatbuffers::Offset<AttentionParam> AttentionParam::Pack(flatbuffers::FlatBufferBuilder &_fbb, const AttentionParamT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
@@ -5224,9 +5236,11 @@ inline flatbuffers::Offset<AttentionParam> CreateAttentionParam(flatbuffers::Fla
   (void)_o;
   struct _VectorArgs { flatbuffers::FlatBufferBuilder *__fbb; const AttentionParamT* __o; const flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
   auto _kv_cache = _o->kv_cache;
+  auto _flash_attn_kernel = _o->flash_attn_kernel;
   return MNN::CreateAttentionParam(
       _fbb,
-      _kv_cache);
+      _kv_cache,
+      _flash_attn_kernel);
 }
 
 inline FmhaV2ParamT *FmhaV2Param::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
@@ -8691,13 +8705,15 @@ inline const flatbuffers::TypeTable *StringVecTypeTable() {
 
 inline const flatbuffers::TypeTable *AttentionParamTypeTable() {
   static const flatbuffers::TypeCode type_codes[] = {
+    { flatbuffers::ET_BOOL, 0, -1 },
     { flatbuffers::ET_BOOL, 0, -1 }
   };
   static const char * const names[] = {
-    "kv_cache"
+    "kv_cache",
+    "flash_attn_kernel"
   };
   static const flatbuffers::TypeTable tt = {
-    flatbuffers::ST_TABLE, 1, type_codes, nullptr, nullptr, names
+    flatbuffers::ST_TABLE, 2, type_codes, nullptr, nullptr, names
   };
   return &tt;
 }

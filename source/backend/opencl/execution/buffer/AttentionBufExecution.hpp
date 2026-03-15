@@ -67,6 +67,7 @@ public:
     ErrorCode longPrefillResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
     ErrorCode prefillResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
     ErrorCode decodeResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
+    ErrorCode flashAttnResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
 
     ErrorCode UpdateArgs(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
     ErrorCode init();
@@ -87,6 +88,11 @@ private:
     int mKeyValueMaxlen = 0;
     int mDecodeTmpMaxlen = 0;
 
+    bool mFlashAttnEnabled = true;
+    bool mUseFlashAttn = false;
+    std::shared_ptr<KernelWrap> mKernel_flash_attn;
+    std::vector<uint32_t> mGwsFA;
+    std::vector<uint32_t> mLwsFA;
 
     uint32_t mMaxWorkGroupSize;
     OpenCLBackend *mOpenCLBackend;

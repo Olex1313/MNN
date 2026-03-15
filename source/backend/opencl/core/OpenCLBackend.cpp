@@ -27,6 +27,8 @@ namespace OpenCL {
 void registerOpenCLOps();
 #endif
 
+#define LOG_VERBOSE 1
+
 
 CLRuntime::CLRuntime(const Backend::Info& info){
     mInfo = info;
@@ -1512,7 +1514,7 @@ void OpenCLBackend::setGpuMode(const int cl_mode_num) {
     }
     auto gpuType = mOpenCLRuntime->getGpuType();
     if(mMemType == AUTO) {
-        if(gpuType == MALI || gpuType == INTEL) {
+        if(gpuType == MALI || gpuType == INTEL || gpuType == OTHER) {
             mMemType = BUFFER;
         } else {
             mMemType = IMAGE;
