@@ -20,20 +20,26 @@ void load_global_tile_mnn(
     const int local_id,
     const int wg_size
 ) {
-    const int total_elements = num_rows * D_HEAD;
+    const int d_head_vec = D_HEAD / 4;
+    const int total_elements = num_rows * d_head_vec;
     for (int i = local_id; i < total_elements; i += wg_size) {
-        int r = i / D_HEAD;
-        int c = i % D_HEAD;
+        int r = i / d_head_vec;
+        int c = i % d_head_vec;
         int global_row = start_row + r;
+
+        int dst_offset = (r*D_HEAD) + c*4;
+        int src_offset = base_offset + global_row * stride_seq + c*4;
+
         if (global_row < max_rows) {
-            dst[i] = src[base_offset + global_row * stride_seq + c];
+            float4 val = vload4(0, src + src_offset);
+            vstore4(val, 0, dst+dst_offset);
         } else {
-            dst[i] = 0.0f;
+            vstore4((float4)(0.0f), 0, dst+dst_offset);
         }
     }
 }
 
-// Q, K, V, O: float32[B, S, H, D]
+// Q, K, V, O: float32[B, S, H, D]  (MNN layout: seq before heads)
 __kernel void flash_attention_v2_mnn_fwd(
     __global const float *Q,
     __global const float *K,
@@ -68,8 +74,8 @@ __kernel void flash_attention_v2_mnn_fwd(
 
     float m_i = -FLT_MAX;
     float l_i = 0.0f;
-    float O_acc[D_HEAD];
-    for (int d = 0; d < D_HEAD; ++d) O_acc[d] = 0.0f;
+    float4 O_acc4[D_HEAD / 4];
+    for (int d = 0; d < D_HEAD / 4; ++d) O_acc4[d] = (float4)(0.0f);
 
     const int q_start_row = q_block_idx * BLOCK_SIZE_M;
     const int num_q_rows  = (q_start_row + BLOCK_SIZE_M > L) ? (L - q_start_row) : BLOCK_SIZE_M;
@@ -92,14 +98,17 @@ __kernel void flash_attention_v2_mnn_fwd(
         if (tid < BLOCK_SIZE_M && tid < num_q_rows) {
             float scores[BLOCK_SIZE_N];
             float m_block = -FLT_MAX;
+            const int q_off = tid * D_HEAD;
             for (int j = 0; j < num_k_rows; ++j) {
                 if (is_causal && (k_start_row + j) > (q_start_row + tid)) {
                     scores[j] = -FLT_MAX;
                     continue;
                 }
                 float s = 0.0f;
-                for (int d = 0; d < D_HEAD; ++d) {
-                    s += Q_tile[tid * D_HEAD + d] * K_tile[j * D_HEAD + d];
+                const int k_off = j * D_HEAD;
+                for (int d = 0; d < D_HEAD / 4; ++d) {
+                    s += dot(vload4(d, Q_tile + q_off),
+                             vload4(d, K_tile + k_off));
                 }
                 scores[j] = s * scale;
                 m_block = fmax(m_block, scores[j]);
@@ -108,13 +117,14 @@ __kernel void flash_attention_v2_mnn_fwd(
             float m_new = fmax(m_i, m_block);
             float alpha = exp(m_i - m_new);
 
-            for (int d = 0; d < D_HEAD; ++d) O_acc[d] *= alpha;
+            for (int d = 0; d < D_HEAD / 4; ++d) O_acc4[d] *= alpha;
 
             float block_l = 0.0f;
             for (int j = 0; j < num_k_rows; ++j) {
                 float e = exp(scores[j] - m_new);
-                for (int d = 0; d < D_HEAD; ++d) {
-                    O_acc[d] += e * V_tile[j * D_HEAD + d];
+                const int v_off = j * D_HEAD;
+                for (int d = 0; d < D_HEAD / 4; ++d) {
+                    O_acc4[d] += e * vload4(d, V_tile + v_off);
                 }
                 block_l += e;
             }
@@ -128,8 +138,9 @@ __kernel void flash_attention_v2_mnn_fwd(
     if (tid < BLOCK_SIZE_M && tid < num_q_rows) {
         // write [B, S, H, D]: base_Q + token * stride_Q + d
         const int global_out_base = base_Q + (q_start_row + tid) * stride_Q;
-        for (int d = 0; d < D_HEAD; ++d) {
-            O[global_out_base + d] = O_acc[d] / l_i;
+        const float inv_l = 1.0f / l_i;
+        for (int d = 0; d < D_HEAD / 4; ++d) {
+            vstore4(O_acc4[d] * inv_l, d, O + global_out_base);
         }
     }
 }

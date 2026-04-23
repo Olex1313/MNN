@@ -62,7 +62,7 @@ private:
 
 class AttentionBufExecution : public CommonExecution {
 public:
-    AttentionBufExecution(const MNN::Op *op, Backend *backend, bool kv_cache);
+    AttentionBufExecution(const MNN::Op *op, Backend *backend, bool kv_cache, bool use_fa);
     AttentionBufExecution(std::shared_ptr<KVCacheCLManager> manager, const MNN::Op *op, Backend *backend);
     ErrorCode longPrefillResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
     ErrorCode prefillResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);

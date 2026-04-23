@@ -27,8 +27,6 @@ namespace OpenCL {
 void registerOpenCLOps();
 #endif
 
-#define LOG_VERBOSE 1
-
 
 CLRuntime::CLRuntime(const Backend::Info& info){
     mInfo = info;

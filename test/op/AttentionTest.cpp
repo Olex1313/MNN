@@ -5,6 +5,7 @@
 //  Created by MNN on 2024/07/23.
 //  Copyright © 2018, Alibaba Group Holding Limited
 //
+#include <chrono>
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 #include <MNN/expr/Expr.hpp>
 #include <MNN/expr/ExprCreator.hpp>
@@ -434,33 +435,55 @@ public:
             }
         }
 
-        // unit test 3: flash attention path (seq > 512, no kv_cache, no GQA)
-        // matches LightGlue attention node parameters: batch=1, numHead=4, kvNumHead=4, headDim=64
+
+        auto runFaTest = [&](bool use_flash) -> bool {
+            std::chrono::steady_clock cl;
+            auto start = cl.now();
+            MNN_PRINT("unit test 3: long seqlen == 3080, no kv_cache, no GQA, use_flash=%d\n", use_flash);
+                int savedNumHead = NumHead, savedKvNumHead = KvNumHead, savedHeadDim = HeadDim;
+                NumHead = 4; KvNumHead = 4; HeadDim = 64;
+                int seq_len = 3080;
+
+                std::shared_ptr<NaiveAttention> naiveAttention(new NaiveAttention);
+                std::shared_ptr<MNN::OpT> attention(new MNN::OpT);
+                attention->type = MNN::OpType_Attention;
+                attention->main.type = MNN::OpParameter_AttentionParam;
+                attention->main.value = new MNN::AttentionParamT;
+                attention->main.AsAttentionParam()->kv_cache = false;
+                attention->main.AsAttentionParam()->flash_attn_kernel = use_flash;
+
+                generateInput(seq_len, precision);
+                mask.clear();
+                expected_result = naiveAttention->onExecute(query, key, value, mask, seq_len);
+
+                Output = Variable::create(Expr::create(attention.get(), {Query, Key, Value}));
+
+                auto gpuStart = cl.now();
+                bool pass = compareResult(seq_len);
+                auto gpuEnd = cl.now();
+
+                auto gpuUs = std::chrono::duration_cast<std::chrono::microseconds>(gpuEnd - gpuStart).count();
+                MNN_PRINT("GPU wall-clock (use_flash=%d): %lld us\n", use_flash, gpuUs);
+                NumHead = savedNumHead; KvNumHead = savedKvNumHead; HeadDim = savedHeadDim;
+                return pass;
+        };
+
         {
-            int savedNumHead = NumHead, savedKvNumHead = KvNumHead, savedHeadDim = HeadDim;
-            NumHead = 4; KvNumHead = 4; HeadDim = 64;
-            int seq_len = 600;
-
-            std::shared_ptr<NaiveAttention> naiveAttention(new NaiveAttention);
-            std::shared_ptr<MNN::OpT> attention(new MNN::OpT);
-            attention->type = MNN::OpType_Attention;
-            attention->main.type = MNN::OpParameter_AttentionParam;
-            attention->main.value = new MNN::AttentionParamT;
-            attention->main.AsAttentionParam()->kv_cache = false;
-            attention->main.AsAttentionParam()->flash_attn_kernel = true;
-
-            generateInput(seq_len, precision);
-            mask.clear();
-            expected_result = naiveAttention->onExecute(query, key, value, mask, seq_len);
-            Output = Variable::create(Expr::create(attention.get(), {Query, Key, Value}));
-            bool pass = compareResult(seq_len);
-
-            NumHead = savedNumHead; KvNumHead = savedKvNumHead; HeadDim = savedHeadDim;
+            bool pass = runFaTest(true);
             if (!pass) {
                 printf("Error: Flash attention long prefill test failed!\n");
                 return false;
             }
         }
+
+        {
+            bool pass = runFaTest(false);
+            if (!pass) {
+                printf("Error: Flash attention long prefill test failed!\n");
+                return false;
+            }
+        }
+
         return true;
     }
 };
