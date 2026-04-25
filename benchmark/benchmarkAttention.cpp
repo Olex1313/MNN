@@ -100,9 +100,9 @@ static void benchAttention(const BenchCase& c, const ScheduleConfig& config,
 
         auto t0 = steady_clock::now();
         net->runSession(session);
+        outputTensor->copyToHostTensor(outputHost.get());
         auto t1 = steady_clock::now();
 
-        outputTensor->copyToHostTensor(outputHost.get());
         float us = std::chrono::duration<float, std::micro>(t1 - t0).count();
         minUs = std::min(minUs, us);
         maxUs = std::max(maxUs, us);
@@ -149,7 +149,7 @@ int main(int argc, const char* argv[]) {
     ScheduleConfig config;
     config.type = forward;
     config.numThread = 1;
-    config.mode = MNN_GPU_TUNING_WIDE | MNN_GPU_MEMORY_BUFFER;
+    config.mode = MNN_GPU_TUNING_NONE | MNN_GPU_MEMORY_BUFFER;
     BackendConfig bnConfig;
     bnConfig.precision = BackendConfig::Precision_Normal;
     bnConfig.power = BackendConfig::Power_High;
@@ -160,10 +160,11 @@ int main(int argc, const char* argv[]) {
               forward, loop, warmup, deviceId);
 
     std::vector<BenchCase> cases;
-    std::vector<int> batches = {1, 2, 4}; // 8/16/32 right now overflows even without flash
-    std::vector<int> seqlens = {16, 32, 128, 256, 512, 1024, 2048, 4096};
-    std::vector<int> num_heads = {4, 8};
-    std::vector<int> headdims = {32, 64};
+    // std::vector<int> batches = {1, 2, 4}; // 8/16/32 right now overflows even without flash
+    std::vector<int> batches = {1 }; // 8/16/32 right now overflows even without flash
+    std::vector<int> seqlens = {512, 1024, 2048, 4096};
+    std::vector<int> num_heads = {4};
+    std::vector<int> headdims = {64};
     for (auto batch : batches) {
         for (auto seq : seqlens) {
             for (auto heads : num_heads) {

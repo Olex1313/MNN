@@ -6,6 +6,7 @@
 //  Copyright © 2018, Alibaba Group Holding Limited
 //
 
+#include "MNN_generated.h"
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 
 #include "backend/opencl/execution/buffer/AttentionBufExecution.hpp"
@@ -494,10 +495,11 @@ ErrorCode AttentionBufExecution::flashAttnResize(const std::vector<Tensor *> &in
     mKernel_flash_attn->get().setArg(idx++, scale);
     mKernel_flash_attn->get().setArg(idx++, 0); // is_causal = false
 
-    constexpr int BLOCK_M = 32, WG = 32;
+    constexpr int BLOCK_M = 64, THREADS_PER_ROW = 2;
+    constexpr int WG_SIZE = BLOCK_M * THREADS_PER_ROW;
     int num_q_blocks = (seqlen + BLOCK_M - 1) / BLOCK_M;
-    mGwsFA = {(uint32_t)(num_q_blocks * WG), (uint32_t)batch, (uint32_t)numHead};
-    mLwsFA = {(uint32_t)WG, 1u, 1u};
+    mGwsFA = {(uint32_t)(num_q_blocks * WG_SIZE), (uint32_t)batch, (uint32_t)numHead};
+    mLwsFA = {(uint32_t)WG_SIZE, 1u, 1u};
 
     return NO_ERROR;
 }
