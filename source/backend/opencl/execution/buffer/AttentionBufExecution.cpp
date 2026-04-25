@@ -476,7 +476,18 @@ ErrorCode AttentionBufExecution::flashAttnResize(const std::vector<Tensor *> &in
     int headDim  = shape[3];
     int kvSeqlen = inputs[1]->shape()[1];
 
+    constexpr int BLOCK_M = 64, THREADS_PER_ROW = 2, BLOCK_N = 32;
+    constexpr int WG_SIZE = BLOCK_M * THREADS_PER_ROW;
+    int num_q_blocks = (seqlen + BLOCK_M - 1) / BLOCK_M;
+
+    mGwsFA = {(uint32_t)(num_q_blocks * WG_SIZE), (uint32_t)batch, (uint32_t)numHead};
+    mLwsFA = {(uint32_t)WG_SIZE, 1u, 1u};
+
     std::set<std::string> opts;
+
+    opts.insert("-D THREADS_PER_ROW="+ std::to_string(2));
+    opts.insert("-D BLOCK_SIZE_M="+ std::to_string(BLOCK_M));
+    opts.insert("-D BLOCK_SIZE_N="+ std::to_string(BLOCK_N));
     opts.insert("-D D_HEAD=" + std::to_string(headDim));
 
     mKernel_flash_attn = runtime->buildKernel(
@@ -494,12 +505,6 @@ ErrorCode AttentionBufExecution::flashAttnResize(const std::vector<Tensor *> &in
     mKernel_flash_attn->get().setArg(idx++, kvSeqlen);
     mKernel_flash_attn->get().setArg(idx++, scale);
     mKernel_flash_attn->get().setArg(idx++, 0); // is_causal = false
-
-    constexpr int BLOCK_M = 64, THREADS_PER_ROW = 2;
-    constexpr int WG_SIZE = BLOCK_M * THREADS_PER_ROW;
-    int num_q_blocks = (seqlen + BLOCK_M - 1) / BLOCK_M;
-    mGwsFA = {(uint32_t)(num_q_blocks * WG_SIZE), (uint32_t)batch, (uint32_t)numHead};
-    mLwsFA = {(uint32_t)WG_SIZE, 1u, 1u};
 
     return NO_ERROR;
 }

@@ -8,6 +8,7 @@
 #include <random>
 
 #include "MNN_generated.h"
+#include "core/Backend.hpp"
 #include <MNN/MNNForwardType.h>
 #include <MNN/MNNDefine.h>
 #define MNN_USER_SET_DEVICE
@@ -64,7 +65,6 @@ static void benchAttention(const BenchCase& c, const ScheduleConfig& config,
         (const void*)buffer.data(), buffer.size()));
     net->setSessionMode(Interpreter::Session_Release);
     auto session = net->createSession(config);
-    net->releaseModel();
 
     auto inputs = net->getSessionInputAll(session);
     std::vector<std::shared_ptr<Tensor>> inputHosts;
@@ -113,9 +113,9 @@ static void benchAttention(const BenchCase& c, const ScheduleConfig& config,
 
     // FLOPs : 4 * B * H * L * S * D
     double flops = 4.0 * c.batch * c.num_head * c.seq_len * c.seq_len * c.head_dim;
-    double tflops = flops / (minUs / 1e6) / 1e12;
+    double tflops = flops / (minUs / 1e6) / 1e9;
 
-    MNN_PRINT("min=%8.0f  avg=%8.0f  max=%8.0f us  TFLOPS=%.4f\n\n",
+    MNN_PRINT("min=%8.0f  avg=%8.0f  max=%8.0f us  GFLOPS=%.4f\n\n",
            minUs, avgUs, maxUs, tflops);
 }
 
@@ -148,11 +148,13 @@ int main(int argc, const char* argv[]) {
 
     ScheduleConfig config;
     config.type = forward;
-    config.numThread = 1;
     config.mode = MNN_GPU_TUNING_NONE | MNN_GPU_MEMORY_BUFFER;
+
     BackendConfig bnConfig;
-    bnConfig.precision = BackendConfig::Precision_Normal;
-    bnConfig.power = BackendConfig::Power_High;
+	bnConfig.precision = MNN::BackendConfig::Precision_Normal;
+	bnConfig.power     = MNN::BackendConfig::Power_Normal;
+	bnConfig.memory    = MNN::BackendConfig::Memory_Normal;
+
     bnConfig.sharedContext = &devCtx;
     config.backendConfig = &bnConfig;
 
@@ -162,8 +164,8 @@ int main(int argc, const char* argv[]) {
     std::vector<BenchCase> cases;
     // std::vector<int> batches = {1, 2, 4}; // 8/16/32 right now overflows even without flash
     std::vector<int> batches = {1 }; // 8/16/32 right now overflows even without flash
-    std::vector<int> seqlens = {512, 1024, 2048, 4096};
-    std::vector<int> num_heads = {4};
+    std::vector<int> seqlens = {4096};
+    std::vector<int> num_heads = {12};
     std::vector<int> headdims = {64};
     for (auto batch : batches) {
         for (auto seq : seqlens) {

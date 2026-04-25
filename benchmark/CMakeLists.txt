@@ -15,6 +15,9 @@ if(MNN_CUDA_PROFILE)
     set(EXTRA_OPTIONS -DMNN_CUDA_PROFILE)
 endif()
 
+IF (MNN_GPU_TIME_PROFILE)
+    add_definitions(-DENABLE_OPENCL_TIME_PROFILER)
+ENDIF()
 
 add_executable(benchmark.out ${CMAKE_CURRENT_LIST_DIR}/benchmark.cpp ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/revertMNNModel.cpp)
 target_include_directories(benchmark.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/ ${CMAKE_CURRENT_SOURCE_DIR}/tools/ ${EXTRA_INCLUDE})
