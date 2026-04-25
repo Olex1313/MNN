@@ -6,6 +6,7 @@
 //  Copyright © 2018, Alibaba Group Holding Limited
 //
 
+#include "MNN/MNNForwardType.h"
 #include "MNN_generated.h"
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 
@@ -489,6 +490,12 @@ ErrorCode AttentionBufExecution::flashAttnResize(const std::vector<Tensor *> &in
     opts.insert("-D BLOCK_SIZE_M="+ std::to_string(BLOCK_M));
     opts.insert("-D BLOCK_SIZE_N="+ std::to_string(BLOCK_N));
     opts.insert("-D D_HEAD=" + std::to_string(headDim));
+    opts.insert("-D D_HEAD=" + std::to_string(headDim));
+    if (mOpenCLBackend->getPrecision() == BackendConfig::Precision_Low) {
+        opts.insert("-D PRECISION_COMPUTE=half");
+        opts.insert("-D PRECISION_COMPUTE4=half4");
+        opts.insert("-D CONVERT_PRECISION_COMPUTE4=convert_half4");
+    }
 
     mKernel_flash_attn = runtime->buildKernel(
         "fav2_buf", "flash_attention_v2_mnn_fwd", opts, BackendConfig::Precision_High);

@@ -1,3 +1,7 @@
+#ifdef cl_khr_fp16
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#endif
+
 #ifndef D_HEAD
 #define D_HEAD 128
 #endif
@@ -11,12 +15,52 @@
 #define THREADS_PER_ROW 4
 #endif
 
+#ifndef PRECISION_COMPUTE
+#define PRECISION_COMPUTE float
+#endif
+#ifndef PRECISION_COMPUTE4
+#define PRECISION_COMPUTE4 float4
+#endif
+#ifndef CONVERT_PRECISION_COMPUTE4
+#define CONVERT_PRECISION_COMPUTE4 convert_float4
+#endif
+
 #define WG_SIZE (BLOCK_SIZE_M * THREADS_PER_ROW)
 #define D_SLICE (D_HEAD / THREADS_PER_ROW)
 #define D_SLICE_VEC (D_SLICE / 4)
 #define FLT_MAX 3.402823466e+38F
 
-void load_global_tile(
+void load_global_tile_compute(
+    __global const float *src,
+    __local PRECISION_COMPUTE *dst,
+    const int base_offset,
+    const int stride_seq,
+    const int start_row,
+    const int num_rows,
+    const int max_rows,
+    const int local_id
+) {
+    const int d_head_vec = D_HEAD / 4;
+    const int total_elements = num_rows * d_head_vec;
+    for (int i = local_id; i < total_elements; i += WG_SIZE) {
+        int r = i / d_head_vec;
+        int c = i % d_head_vec;
+        int global_row = start_row + r;
+
+        int dst_offset = r * D_HEAD + c * 4;
+        int src_offset = base_offset + global_row * stride_seq + c * 4;
+
+        PRECISION_COMPUTE4 val;
+        if (global_row < max_rows) {
+            val = CONVERT_PRECISION_COMPUTE4(vload4(0, src + src_offset));
+        } else {
+            val = CONVERT_PRECISION_COMPUTE4((float4)(0.0f));
+        }
+        vstore4(val, 0, dst + dst_offset);
+    }
+}
+
+void load_global_tile_fp32(
     __global const float *src,
     __local float *dst,
     const int base_offset,
@@ -72,8 +116,8 @@ __kernel void flash_attention_v2_mnn_fwd(
     const int base_Q = batch_idx * L * stride_seq + head_idx * D_HEAD;
     const int base_K = batch_idx * S * stride_seq + head_idx * D_HEAD;
 
-    __local float Q_tile[BLOCK_SIZE_M * D_HEAD];
-    __local float KV_tile[BLOCK_SIZE_N * D_HEAD];
+    __local PRECISION_COMPUTE Q_tile[BLOCK_SIZE_M * D_HEAD];
+    __local float KV_tile_fp32[BLOCK_SIZE_N * D_HEAD];
 
     float m_i = -FLT_MAX;
     float l_i = 0.0f;
@@ -83,7 +127,7 @@ __kernel void flash_attention_v2_mnn_fwd(
     const int q_start_row = q_block_idx * BLOCK_SIZE_M;
     const int num_q_rows  = min(BLOCK_SIZE_M, L - q_start_row);
 
-    load_global_tile(Q, Q_tile, base_Q, stride_seq, q_start_row, BLOCK_SIZE_M, L, tid);
+    load_global_tile_compute(Q, Q_tile, base_Q, stride_seq, q_start_row, BLOCK_SIZE_M, L, tid);
     barrier(CLK_LOCAL_MEM_FENCE);
 
     const int num_kv_blocks = (S + BLOCK_SIZE_N - 1) / BLOCK_SIZE_N;
@@ -94,9 +138,10 @@ __kernel void flash_attention_v2_mnn_fwd(
 
         if (is_causal && k_start_row > (q_start_row + BLOCK_SIZE_M - 1)) break;
 
-        load_global_tile(K, KV_tile, base_K, stride_seq, k_start_row, BLOCK_SIZE_N, S, tid);
+        load_global_tile_compute(K, (__local PRECISION_COMPUTE *)KV_tile_fp32, base_K, stride_seq, k_start_row, BLOCK_SIZE_N, S, tid);
         barrier(CLK_LOCAL_MEM_FENCE);
 
+        __local PRECISION_COMPUTE *K_tile = (__local PRECISION_COMPUTE *)KV_tile_fp32;
         float scores[BLOCK_SIZE_N];
         float m_block = -FLT_MAX;
 
@@ -110,8 +155,9 @@ __kernel void flash_attention_v2_mnn_fwd(
                 float s = 0.0f;
                 const int k_off = j * D_HEAD;
                 for (int d = 0; d < D_HEAD / 4; ++d) {
-                    s += dot(vload4(d, Q_tile + q_off),
-                             vload4(d, KV_tile + k_off));
+                    float4 q4 = convert_float4(vload4(d, Q_tile + q_off));
+                    float4 k4 = convert_float4(vload4(d, K_tile + k_off));
+                    s += dot(q4, k4);
                 }
                 scores[j] = s * scale;
                 m_block = fmax(m_block, scores[j]);
@@ -131,7 +177,7 @@ __kernel void flash_attention_v2_mnn_fwd(
         }
         barrier(CLK_LOCAL_MEM_FENCE);
 
-        load_global_tile(V, KV_tile, base_K, stride_seq, k_start_row, BLOCK_SIZE_N, S, tid);
+        load_global_tile_fp32(V, KV_tile_fp32, base_K, stride_seq, k_start_row, BLOCK_SIZE_N, S, tid);
         barrier(CLK_LOCAL_MEM_FENCE);
 
         if (row_id < num_q_rows) {
@@ -140,7 +186,7 @@ __kernel void flash_attention_v2_mnn_fwd(
                 const int v_off = j * D_HEAD + d_start;
 #pragma unroll
                 for (int d = 0; d < D_SLICE_VEC; ++d) {
-                    O_acc4[d] += e * vload4(d, KV_tile + v_off);
+                    O_acc4[d] += e * vload4(d, KV_tile_fp32 + v_off);
                 }
             }
         }
