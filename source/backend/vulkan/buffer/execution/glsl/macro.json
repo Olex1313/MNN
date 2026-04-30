@@ -1,4 +1,8 @@
 {
+    "sdpa_flash_mnn.comp": [
+        "D_HEAD_64",
+        "D_HEAD_128"
+    ],
     "blit.comp":[
         "C4"
     ],

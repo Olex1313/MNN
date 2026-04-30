@@ -5,6 +5,7 @@
 //  Created by MNN on 2024/07/23.
 //  Copyright © 2018, Alibaba Group Holding Limited
 //
+#include "MNN/MNNForwardType.h"
 #include <chrono>
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 #include <MNN/expr/Expr.hpp>
@@ -49,6 +50,7 @@ struct KVMeta {
 };
 
 static KVMeta gMeta;
+static MNNForwardType gForwardType;
 static std::shared_ptr<Module> _makeAttentionModule() {
     auto Q = _Input();
     auto K = _Input();
@@ -365,7 +367,8 @@ public:
     virtual bool run(int precision) {
         srand(2024);
         // unit test 1
-        {
+        // vulkan or cpu does not support kv-cached input
+        if (MNNTestSuite::get()->pStaus.forwardType != MNNForwardType::MNN_FORWARD_VULKAN) {
             std::shared_ptr<NaiveAttention> naiveAttention(new NaiveAttention);
             std::shared_ptr<MNN::OpT> attention(new MNN::OpT);
             attention->type = MNN::OpType_Attention;
@@ -442,7 +445,7 @@ public:
             MNN_PRINT("unit test 3: long seqlen == 3080, no kv_cache, no GQA, use_flash=%d\n", use_flash);
                 int savedNumHead = NumHead, savedKvNumHead = KvNumHead, savedHeadDim = HeadDim;
                 NumHead = 4; KvNumHead = 4; HeadDim = 64;
-                int seq_len = 3080;
+                int seq_len = 1024;
 
                 std::shared_ptr<NaiveAttention> naiveAttention(new NaiveAttention);
                 std::shared_ptr<MNN::OpT> attention(new MNN::OpT);

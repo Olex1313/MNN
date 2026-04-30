@@ -63,7 +63,7 @@ static void benchAttention(const BenchCase& c, const ScheduleConfig& config,
 
     std::unique_ptr<Interpreter> net(Interpreter::createFromBuffer(
         (const void*)buffer.data(), buffer.size()));
-    net->setSessionMode(Interpreter::Session_Release);
+    // net->setSessionMode(Interpreter::Session_Release);
     auto session = net->createSession(config);
 
     auto inputs = net->getSessionInputAll(session);
@@ -155,7 +155,9 @@ int main(int argc, const char* argv[]) {
 	bnConfig.power     = MNN::BackendConfig::Power_Normal;
 	bnConfig.memory    = MNN::BackendConfig::Memory_Normal;
 
-    bnConfig.sharedContext = &devCtx;
+    // vulkan backend crushes if shared-context is not fullfiled correctly,
+    // i've skipped it for now to select automatically
+    bnConfig.sharedContext = (forward != MNN_FORWARD_VULKAN ) ? &devCtx : nullptr;
     config.backendConfig = &bnConfig;
 
     MNN_PRINT("MNN Attention Benchmark  forward=%d  loop=%d  warmup=%d  device=%d\n\n",
@@ -163,9 +165,9 @@ int main(int argc, const char* argv[]) {
 
     std::vector<BenchCase> cases;
     // std::vector<int> batches = {1, 2, 4}; // 8/16/32 right now overflows even without flash
-    std::vector<int> batches = {1 }; // 8/16/32 right now overflows even without flash
-    std::vector<int> seqlens = {4096};
-    std::vector<int> num_heads = {12};
+    std::vector<int> batches = {4 }; // 8/16/32 right now overflows even without flash
+    std::vector<int> seqlens = {8192};
+    std::vector<int> num_heads = {4};
     std::vector<int> headdims = {64};
     for (auto batch : batches) {
         for (auto seq : seqlens) {

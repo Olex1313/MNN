@@ -1,0 +1,136 @@
+#version 450 core
+// Plain Flash Attention v2 (no mask, no causal) for MNN Vulkan buffer backend.
+// Shared memory: Q_tile[BLOCK_M*D_HEAD] + KV_tile[BLOCK_N*D_HEAD]
+// = (32+32)*128*4 = 32KB (D_HEAD_128) or (32+32)*64*4 = 16KB (D_HEAD_64)
+
+#ifdef D_HEAD_64
+  #define D_HEAD 64
+#else
+  #define D_HEAD 128
+#endif
+
+#define BLOCK_M         32
+#define BLOCK_N         32
+#define THREADS_PER_ROW 4
+#define D_SLICE         (D_HEAD / THREADS_PER_ROW)
+#define WG_SIZE         (BLOCK_M * THREADS_PER_ROW)
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer QueryBuf  { float Q[]; };
+layout(set = 0, binding = 1) readonly  buffer KeyBuf    { float K[]; };
+layout(set = 0, binding = 2) readonly  buffer ValueBuf  { float V[]; };
+layout(set = 0, binding = 3) writeonly buffer OutputBuf { float O[]; };
+
+layout(set = 0, binding = 4) uniform Params {
+    int   batch;
+    int   seq_len;
+    int   kv_seq_len;
+    int   num_heads;
+    int   kv_num_heads;
+    int   head_dim;
+    float scale;
+} p;
+
+shared float Q_tile[BLOCK_M * D_HEAD];
+shared float KV_tile[BLOCK_N * D_HEAD];
+
+void main() {
+    int wg_id    = int(gl_WorkGroupID.x);
+    int head_id  = int(gl_WorkGroupID.y);
+    int batch_id = int(gl_WorkGroupID.z);
+
+    int tid    = int(gl_LocalInvocationID.x);
+    int row_id = tid / THREADS_PER_ROW;
+    int d_id   = tid % THREADS_PER_ROW;
+    int d_start = d_id * D_SLICE;
+
+    int q_start = wg_id * BLOCK_M;
+    if (q_start >= p.seq_len) return;
+    int q_end  = min(q_start + BLOCK_M, p.seq_len);
+    int q_rows = q_end - q_start;
+
+    int stride_q   = p.num_heads    * p.head_dim;
+    int stride_kv  = p.kv_num_heads * p.head_dim;
+    int kv_head_id = head_id / (p.num_heads / p.kv_num_heads);
+    int base_Q = batch_id * p.seq_len    * stride_q  + head_id    * p.head_dim;
+    int base_K = batch_id * p.kv_seq_len * stride_kv + kv_head_id * p.head_dim;
+
+    // Load Q tile into shared memory
+    for (int i = tid; i < q_rows * D_HEAD; i += WG_SIZE) {
+        int r = i / D_HEAD, d = i % D_HEAD;
+        Q_tile[r * D_HEAD + d] = Q[base_Q + (q_start + r) * stride_q + d];
+    }
+    barrier();
+
+    float m_i = uintBitsToFloat(0xFF800000u); // -inf
+    float l_i = 0.0;
+    float O_acc[D_SLICE];
+    for (int d = 0; d < D_SLICE; d++) O_acc[d] = 0.0;
+    float scores[BLOCK_N];
+
+    int num_kv_blocks = (p.kv_seq_len + BLOCK_N - 1) / BLOCK_N;
+    for (int kv_block = 0; kv_block < num_kv_blocks; kv_block++) {
+        int kv_start = kv_block * BLOCK_N;
+        int kv_end   = min(kv_start + BLOCK_N, p.kv_seq_len);
+        int kv_rows  = kv_end - kv_start;
+
+        // Load K tile.
+        for (int i = tid; i < kv_rows * D_HEAD; i += WG_SIZE) {
+            int r = i / D_HEAD, d = i % D_HEAD;
+            KV_tile[r * D_HEAD + d] = K[base_K + (kv_start + r) * stride_kv + d];
+        }
+        barrier();
+
+        // Compute scores = Q @ K^T * scale.
+        float m_block = uintBitsToFloat(0xFF800000u); // hack around 1/0 == inf
+        if (row_id < q_rows) {
+            for (int j = 0; j < kv_rows; j++) {
+                float s = 0.0;
+                for (int d = 0; d < D_HEAD; d++)
+                    s += Q_tile[row_id * D_HEAD + d] * KV_tile[j * D_HEAD + d];
+                scores[j] = s * p.scale;
+                m_block = max(m_block, scores[j]);
+            }
+        }
+
+        // Online softmax update
+        if (row_id < q_rows) {
+            float m_new = max(m_i, m_block);
+            float alpha = exp(m_i - m_new);
+            for (int d = 0; d < D_SLICE; d++) O_acc[d] *= alpha;
+            float block_l = 0.0;
+            for (int j = 0; j < kv_rows; j++) {
+                scores[j] = exp(scores[j] - m_new);
+                block_l += scores[j];
+            }
+            l_i = l_i * alpha + block_l;
+            m_i = m_new;
+        }
+        barrier();
+
+        // Load V tile (reuse KV_tile)
+        for (int i = tid; i < kv_rows * D_HEAD; i += WG_SIZE) {
+            int r = i / D_HEAD, d = i % D_HEAD;
+            KV_tile[r * D_HEAD + d] = V[base_K + (kv_start + r) * stride_kv + d];
+        }
+        barrier();
+
+        // Accumulate P @ V
+        if (row_id < q_rows) {
+            for (int j = 0; j < kv_rows; j++) {
+                for (int d = 0; d < D_SLICE; d++)
+                    O_acc[d] += scores[j] * KV_tile[j * D_HEAD + d_start + d];
+            }
+        }
+        barrier();
+    }
+
+    // Normalize and write output
+    if (row_id < q_rows) {
+        int out_base = base_Q + (q_start + row_id) * stride_q + d_start;
+        float inv_l = 1.0 / l_i;
+        for (int d = 0; d < D_SLICE; d++)
+            O[out_base + d] = O_acc[d] * inv_l;
+    }
+}

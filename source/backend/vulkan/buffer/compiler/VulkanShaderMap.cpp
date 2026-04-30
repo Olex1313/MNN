@@ -42,6 +42,9 @@ mMaps.insert(std::make_pair("glsl_cast_float_int_REVERT_comp", std::make_pair(gl
 mMaps.insert(std::make_pair("glsl_convolution_comp", std::make_pair(glsl_convolution_comp,glsl_convolution_comp_len)));
 mMaps.insert(std::make_pair("glsl_convolution_RELU_comp", std::make_pair(glsl_convolution_RELU_comp,glsl_convolution_RELU_comp_len)));
 mMaps.insert(std::make_pair("glsl_convolution_RELU6_comp", std::make_pair(glsl_convolution_RELU6_comp,glsl_convolution_RELU6_comp_len)));
+mMaps.insert(std::make_pair("glsl_sdpa_flash_mnn_comp", std::make_pair(glsl_sdpa_flash_mnn_comp,glsl_sdpa_flash_mnn_comp_len)));
+mMaps.insert(std::make_pair("glsl_sdpa_flash_mnn_D_HEAD_64_comp", std::make_pair(glsl_sdpa_flash_mnn_D_HEAD_64_comp,glsl_sdpa_flash_mnn_D_HEAD_64_comp_len)));
+mMaps.insert(std::make_pair("glsl_sdpa_flash_mnn_D_HEAD_128_comp", std::make_pair(glsl_sdpa_flash_mnn_D_HEAD_128_comp,glsl_sdpa_flash_mnn_D_HEAD_128_comp_len)));
 mMaps.insert(std::make_pair("glsl_binary_int_comp", std::make_pair(glsl_binary_int_comp,glsl_binary_int_comp_len)));
 mMaps.insert(std::make_pair("glsl_binary_int_ADD_comp", std::make_pair(glsl_binary_int_ADD_comp,glsl_binary_int_ADD_comp_len)));
 mMaps.insert(std::make_pair("glsl_binary_int_SUB_comp", std::make_pair(glsl_binary_int_SUB_comp,glsl_binary_int_SUB_comp_len)));
