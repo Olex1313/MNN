@@ -115,8 +115,8 @@ static void benchAttention(const BenchCase& c, const ScheduleConfig& config,
     double flops = 4.0 * c.batch * c.num_head * c.seq_len * c.seq_len * c.head_dim;
     double tflops = flops / (minUs / 1e6) / 1e9;
 
-    MNN_PRINT("min=%8.0f  avg=%8.0f  max=%8.0f us  GFLOPS=%.4f\n\n",
-           minUs, avgUs, maxUs, tflops);
+    MNN_PRINT("tag=%s B=%d  seq=%4d  H=%2d  D=%3d min=%8.0f  avg=%8.0f  max=%8.0f us  GFLOPS=%.4f\n\n",
+           tag, c.batch, c.seq_len, c.num_head, c.head_dim, minUs, avgUs, maxUs, tflops);
 }
 
 static void printUsage(const char* prog) {
@@ -148,7 +148,11 @@ int main(int argc, const char* argv[]) {
 
     ScheduleConfig config;
     config.type = forward;
-    config.mode = MNN_GPU_TUNING_NONE | MNN_GPU_MEMORY_BUFFER;
+    if (forward == MNN_FORWARD_VULKAN) {
+        config.mode = MNN_GPU_TUNING_WIDE | MNN_GPU_RECORD_BATCH;;
+    } else {
+        config.mode = MNN_GPU_TUNING_NONE | MNN_GPU_MEMORY_BUFFER;
+    }
 
     BackendConfig bnConfig;
 	bnConfig.precision = MNN::BackendConfig::Precision_Normal;
@@ -165,8 +169,8 @@ int main(int argc, const char* argv[]) {
 
     std::vector<BenchCase> cases;
     // std::vector<int> batches = {1, 2, 4}; // 8/16/32 right now overflows even without flash
-    std::vector<int> batches = {4 }; // 8/16/32 right now overflows even without flash
-    std::vector<int> seqlens = {8192};
+    std::vector<int> batches = {4}; // 8/16/32 right now overflows even without flash
+    std::vector<int> seqlens = {4096, 8192, 16384};
     std::vector<int> num_heads = {4};
     std::vector<int> headdims = {64};
     for (auto batch : batches) {
@@ -174,7 +178,7 @@ int main(int argc, const char* argv[]) {
             for (auto heads : num_heads) {
                 for (auto hd : headdims) {
                     cases.push_back({batch, seq, heads, hd, true});
-                    cases.push_back({batch, seq, heads, hd, false});
+                    if (seq <= 8192 && forward == MNN_FORWARD_OPENCL) cases.push_back({batch, seq, heads, hd, false});
                 }
             }
         }
