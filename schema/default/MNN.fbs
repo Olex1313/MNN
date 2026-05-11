@@ -231,6 +231,7 @@ table StringVec {
 table AttentionParam {
     kv_cache: bool = true;
     flash_attn_kernel: bool = false;
+    impl_type: int = 0;
 }
 
 table FmhaV2Param {
