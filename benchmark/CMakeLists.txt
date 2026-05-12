@@ -30,7 +30,18 @@ target_include_directories(benchmarkExprModels.out PRIVATE "${CMAKE_CURRENT_LIST
 target_link_libraries(benchmarkExprModels.out ${MNN_DEPS})
 
 add_executable(benchmarkAttention.out ${CMAKE_CURRENT_LIST_DIR}/benchmarkAttention.cpp)
-target_include_directories(benchmarkAttention.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/)
+target_include_directories(benchmarkAttention.out PRIVATE
+    ${MNN_INCLUDES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/vulkan
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/vulkan/component
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/vulkan/runtime
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/vulkan/schema/current
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/vulkan/buffer
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/vulkan/buffer/backend
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/vulkan/buffer/shaders
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/opencl/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/opencl
+)
 target_link_libraries(benchmarkAttention.out ${MNN_DEPS})
 
 if (MSVC AND NOT MNN_BUILD_SHARED_LIBS)
