@@ -1,0 +1,445 @@
+/*
+ * Flash Attention v2 with Vulkan Cooperative Matrices for MNN.
+ * Algorithm from VulkanCooperativeMatrixAttention by Ervin Tasnadi (MIT).
+ *
+ * Changes from reference:
+ * - Buffer references → plain SSBOs (float32 I/O)
+ * - BHSD layout → BSHD (MNN: [batch, seq, heads, dim])
+ * - K not pre-transposed: transposed during tile load
+ * - Specialization constants → compile-time macros
+ * - Workgroup: (q_block, head, batch) instead of flat (B*H*S/Br)
+ * - GQA: kv_head = head / (num_heads / kv_num_heads)
+ *
+ * Fixed tiling (matches reference defaults for RTX 4060 Ti):
+ *   lM=lN=lK=16, Vr=Vc=2, Ur=Uc=1 → Br=Bc=32
+ *   Vd = D_HEAD/16
+ *   local_size_x = 32 (one subgroup)
+ *
+ * Types: A=fp16, S=fp16, C=fp16 (all fp16, matches reference sfp16-cfp16)
+ */
+
+#version 450 core
+#pragma use_vulkan_memory_model
+#extension GL_KHR_shader_subgroup_basic                    : enable
+#extension GL_KHR_memory_scope_semantics                   : enable
+#extension GL_KHR_cooperative_matrix                       : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+#extension GL_EXT_control_flow_attributes                  : enable
+
+#ifdef D_HEAD_64
+  #define D_HEAD 64
+#else
+  #define D_HEAD 128
+#endif
+
+// Tiling parameters — selected by macro variant.
+// OPT variants use optimal tiling from reference optimizeParameters (shmem < 48KB):
+//   D=64  OPT: Vr=1,Vc=4,Ur=4 → Br=64, Bc=64, local_size_x=128  (score=28)
+//   D=128 OPT: Vr=1,Vc=2,Ur=2 → Br=32, Bc=32, local_size_x=64   (score=10)
+// Default variants keep Vr=2,Vc=2,Ur=1 (Br=32, Bc=32, local_size_x=32) for compatibility.
+#define lM 16
+#define lN 16
+#define lK 16
+#if defined(D_HEAD_64_OPT)
+  #define D_HEAD 64
+  #define Vr 1
+  #define Vc 4
+  #define Ur 4
+#elif defined(D_HEAD_128_OPT)
+  #define D_HEAD 128
+  #define Vr 1
+  #define Vc 2
+  #define Ur 2
+#else
+  // Default: Vr=2,Vc=2,Ur=1 (original)
+  #define Vr 2
+  #define Vc 2
+  #define Ur 1
+#endif
+#define Uc 1
+#define Vd (D_HEAD / lK)
+#define Wr (Vr * lM)
+#define Wc (Vc * lN)
+#define Br (Ur * Wr)
+#define Bc (Uc * Wc)
+
+// nElemsOfBrPerInv: Br rows / local_size_x threads = 1 (always, since Br = Ur*Vr*16 = local_size_x/32*Vr*16)
+#define nElemsOfBrPerInv 1
+
+layout(local_size_x = Ur * Uc * 32, local_size_y = 1, local_size_z = 1) in;
+
+// Types (fp16 throughout)
+#define A_TYPE float16_t
+#define S_TYPE float16_t
+#define C_TYPE float16_t
+
+// Shared memory layout (from reference)
+#define granularitySharedQ  8
+#define granularitySharedKt 8
+#define granularitySharedV  8
+#define granularitySharedS  8
+#define granularitySharedO  8
+
+#define strideSharedQ  (D_HEAD + granularitySharedQ)
+#define strideSharedKt (Bc     + granularitySharedKt)
+#define strideSharedV  (D_HEAD + granularitySharedV)
+#define strideSharedO  (D_HEAD + granularitySharedO)
+#define strideSharedS  (Bc     + granularitySharedS)
+
+#define lenSharedQ  (Br    * strideSharedQ  / granularitySharedQ)
+#define lenSharedKt (D_HEAD * strideSharedKt / granularitySharedKt)
+#define lenSharedV  (Bc    * strideSharedV  / granularitySharedV)
+#define lenSharedO  (Br    * strideSharedO  / granularitySharedO)
+#define lenSharedS  (Br    * strideSharedS  / granularitySharedS)
+
+// MNN SSBO bindings: float32 I/O, BSHD layout
+layout(set = 0, binding = 0) readonly  buffer QBuf { float Q[]; };
+layout(set = 0, binding = 1) readonly  buffer KBuf { float K[]; };
+layout(set = 0, binding = 2) readonly  buffer VBuf { float V[]; };
+layout(set = 0, binding = 3) writeonly buffer OBuf { float O[]; };
+
+layout(set = 0, binding = 4) uniform Params {
+    int   batch;
+    int   seq_len;
+    int   kv_seq_len;
+    int   num_heads;
+    int   kv_num_heads;
+    int   head_dim;
+    float scale;
+} p;
+
+shared uvec4 sharedQ [lenSharedQ];
+shared uvec4 sharedKt[lenSharedKt];
+shared uvec4 sharedV [lenSharedV];
+shared uvec4 sharedO [lenSharedO];
+shared uvec4 sharedS [lenSharedS];
+
+// ---- fp16x4x2 helpers (from reference) ----
+
+struct fp16x4x2 { float16_t values[8]; };
+
+fp16x4x2 fp16x4x2_unpackUvec4(uvec4 elem) {
+    vec2 e0 = unpackHalf2x16(elem.x), e1 = unpackHalf2x16(elem.y);
+    vec2 e2 = unpackHalf2x16(elem.z), e3 = unpackHalf2x16(elem.w);
+    return fp16x4x2(float16_t[8](
+        float16_t(e0.x), float16_t(e0.y), float16_t(e1.x), float16_t(e1.y),
+        float16_t(e2.x), float16_t(e2.y), float16_t(e3.x), float16_t(e3.y)));
+}
+
+uvec4 fp16x4x2_packUvec4(fp16x4x2 elem) {
+    return uvec4(
+        packHalf2x16(vec2(elem.values[0], elem.values[1])),
+        packHalf2x16(vec2(elem.values[2], elem.values[3])),
+        packHalf2x16(vec2(elem.values[4], elem.values[5])),
+        packHalf2x16(vec2(elem.values[6], elem.values[7])));
+}
+
+fp16x4x2 mul(fp16x4x2 x, float16_t v) {
+    [[unroll]] for (int i = 0; i < 8; i++) x.values[i] = float16_t(x.values[i] * v);
+    return x;
+}
+
+fp16x4x2 fp16x4x2_init_zeros() {
+    return fp16x4x2(float16_t[8](
+        float16_t(0), float16_t(0), float16_t(0), float16_t(0),
+        float16_t(0), float16_t(0), float16_t(0), float16_t(0)));
+}
+
+// ---- Shared memory init ----
+
+void initSharedO() {
+    uint nInvs = gl_WorkGroupSize.x;
+    uint elemsPerInv = (lenSharedO + nInvs - 1) / nInvs;
+    for (uint i = 0; i < elemsPerInv; i++) {
+        uint idx = gl_LocalInvocationID.x * elemsPerInv + i;
+        if (idx < lenSharedO) sharedO[idx] = fp16x4x2_packUvec4(fp16x4x2_init_zeros());
+    }
+}
+
+void initSharedS() {
+    uint nInvs = gl_WorkGroupSize.x;
+    uint elemsPerInv = (lenSharedS + nInvs - 1) / nInvs;
+    for (uint i = 0; i < elemsPerInv; i++) {
+        uint idx = gl_LocalInvocationID.x * elemsPerInv + i;
+        if (idx < lenSharedS) sharedS[idx] = fp16x4x2_packUvec4(fp16x4x2_init_zeros());
+    }
+}
+
+// ---- Tile load helpers ----
+// MNN BSHD layout: element [b][s][h][d] at float index b*S*H*D + s*H*D + h*D + d
+// base_Q = b*S*H*D + h*D  (head offset, seq stride = H*D)
+// base_K = b*S*H*D + kv_h*D
+
+// Load Q tile: sharedQ[Br, strideSharedQ] from Q[q_start..q_start+Br, D_HEAD]
+void loadSharedQ(uint q_start, uint base_Q, uint stride_Q) {
+    uint nInvs = gl_WorkGroupSize.x;
+    uint total = Br * D_HEAD;
+    uint elemsPerInv = (total / granularitySharedQ + nInvs - 1) / nInvs;
+    uint elemsPerRow = D_HEAD / granularitySharedQ;
+    uint rowsPerWg   = nInvs / elemsPerRow;
+    for (uint i = 0; i < Br; i += rowsPerWg) {
+        if (gl_LocalInvocationID.x < nInvs) {
+            uint colId  = granularitySharedQ * (gl_LocalInvocationID.x % elemsPerRow);
+            uint rowId  = i + gl_LocalInvocationID.x / elemsPerRow;
+            uint q_row  = q_start + rowId;
+            // Pack 8 fp16 values from float32 global
+            fp16x4x2 packed;
+            [[unroll]] for (int k = 0; k < 8; k++) {
+                uint d = colId + k;
+                packed.values[k] = float16_t((q_row < uint(p.seq_len) && d < D_HEAD)
+                    ? Q[base_Q + q_row * stride_Q + d] : 0.0);
+            }
+            sharedQ[(strideSharedQ * rowId + colId) / granularitySharedQ] = fp16x4x2_packUvec4(packed);
+        }
+    }
+}
+
+// Load K transposed: sharedKt[D_HEAD, strideSharedKt] where sharedKt[d][j] = K[kv_start+j][d]
+// Reference loads Kt as [D_HEAD, Bc] (already transposed). We transpose here.
+void loadSharedKt(uint kv_start, uint base_K, uint stride_KV) {
+    uint nInvs = gl_WorkGroupSize.x;
+    // Iterate over [D_HEAD, Bc] elements, packing 8 fp16 per uvec4 along the Bc dimension
+    uint elemsPerRow = Bc / granularitySharedKt;  // Bc/8 = 4
+    uint rowsPerWg   = nInvs / elemsPerRow;        // 32/4 = 8
+    for (uint i = 0; i < D_HEAD; i += rowsPerWg) {
+        if (gl_LocalInvocationID.x < nInvs) {
+            uint colId = granularitySharedKt * (gl_LocalInvocationID.x % elemsPerRow);
+            uint d     = i + gl_LocalInvocationID.x / elemsPerRow;
+            fp16x4x2 packed;
+            [[unroll]] for (int k = 0; k < 8; k++) {
+                uint j = colId + k;
+                uint kv_row = kv_start + j;
+                packed.values[k] = float16_t((d < D_HEAD && j < Bc && kv_row < uint(p.kv_seq_len))
+                    ? K[base_K + kv_row * stride_KV + d] : 0.0);
+            }
+            sharedKt[(strideSharedKt * d + colId) / granularitySharedKt] = fp16x4x2_packUvec4(packed);
+        }
+    }
+}
+
+// Load V tile: sharedV[Bc, strideSharedV] from V[kv_start..kv_start+Bc, D_HEAD]
+void loadSharedV(uint kv_start, uint base_K, uint stride_KV) {
+    uint nInvs = gl_WorkGroupSize.x;
+    uint elemsPerRow = D_HEAD / granularitySharedV;
+    uint rowsPerWg   = nInvs / elemsPerRow;
+    for (uint i = 0; i < Bc; i += rowsPerWg) {
+        if (gl_LocalInvocationID.x < nInvs) {
+            uint colId  = granularitySharedV * (gl_LocalInvocationID.x % elemsPerRow);
+            uint rowId  = i + gl_LocalInvocationID.x / elemsPerRow;
+            uint kv_row = kv_start + rowId;
+            fp16x4x2 packed;
+            [[unroll]] for (int k = 0; k < 8; k++) {
+                uint d = colId + k;
+                packed.values[k] = float16_t((rowId < Bc && d < D_HEAD && kv_row < uint(p.kv_seq_len))
+                    ? V[base_K + kv_row * stride_KV + d] : 0.0);
+            }
+            sharedV[(strideSharedV * rowId + colId) / granularitySharedV] = fp16x4x2_packUvec4(packed);
+        }
+    }
+}
+
+// Store O tile to global (fp16 → fp32, normalize by li)
+void storeSharedO(uint q_start, uint base_Q, uint stride_Q, S_TYPE li) {
+    uint nInvs = gl_WorkGroupSize.x;
+    uint rowsPerInv = (Br + nInvs - 1) / nInvs;
+    [[unroll]] for (uint i = 0; i < rowsPerInv; i++) {
+        uint rowId = gl_LocalInvocationID.x * rowsPerInv + i;
+        uint q_row = q_start + rowId;
+        if (rowId < Br && q_row < uint(p.seq_len)) {
+            [[unroll]] for (uint j = 0; j < D_HEAD; j += granularitySharedO) {
+                uint idx = (rowId * strideSharedO + j) / granularitySharedO;
+                fp16x4x2 elem = mul(fp16x4x2_unpackUvec4(sharedO[idx]), float16_t(1.0) / li);
+                [[unroll]] for (int k = 0; k < 8; k++)
+                    O[base_Q + q_row * stride_Q + j + k] = float(elem.values[k]);
+            }
+        }
+    }
+}
+
+void main() {
+    uint blockTileR = gl_WorkGroupID.x;   // q_block
+    uint head       = gl_WorkGroupID.y;
+    uint batch_i    = gl_WorkGroupID.z;
+    uint invId      = gl_LocalInvocationID.x;
+
+    uint q_start = blockTileR * Br;
+    if (q_start >= uint(p.seq_len)) return;
+
+    // GQA
+    uint kv_head  = head / uint(p.num_heads / p.kv_num_heads);
+    uint stride_Q  = uint(p.num_heads)    * uint(p.head_dim);
+    uint stride_KV = uint(p.kv_num_heads) * uint(p.head_dim);
+    uint base_Q    = batch_i * uint(p.seq_len)    * stride_Q  + head    * uint(p.head_dim);
+    uint base_K    = batch_i * uint(p.kv_seq_len) * stride_KV + kv_head * uint(p.head_dim);
+
+    loadSharedQ(q_start, base_Q, stride_Q);
+    initSharedO();
+    initSharedS();
+
+    S_TYPE mi_j[nElemsOfBrPerInv];
+    S_TYPE li_j[nElemsOfBrPerInv];
+    [[unroll]] for (int i = 0; i < nElemsOfBrPerInv; i++) {
+        mi_j[i] = S_TYPE(-1.0/0.0);
+        li_j[i] = S_TYPE(0.0);
+    }
+
+    uint Tc = (uint(p.kv_seq_len) + Bc - 1) / Bc;
+
+    for (uint blockTileC = 0; blockTileC < Tc; blockTileC++) {
+        uint kv_start = blockTileC * Bc;
+
+        loadSharedKt(kv_start, base_K, stride_KV);
+        loadSharedV (kv_start, base_K, stride_KV);
+
+        S_TYPE mi_jm1[nElemsOfBrPerInv];
+        S_TYPE li_jm1[nElemsOfBrPerInv];
+        [[unroll]] for (int i = 0; i < nElemsOfBrPerInv; i++) {
+            mi_jm1[i] = mi_j[i];
+            li_jm1[i] = li_j[i];
+        }
+
+        // Warptile coords (single subgroup: subgroupId=0, Ur=Uc=1)
+        uvec2 warpTileCoordS  = uvec2(0, 0);
+        uvec2 warpTileCoordShS  = warpTileCoordS * uvec2(Wr, Wc);
+        uvec2 warpTileCoordShQ  = uvec2(Wr * warpTileCoordS[0], 0);
+        uvec2 warpTileCoordShKt = uvec2(0, Wc * warpTileCoordS[1]);
+        uvec2 warpTileCoordShV  = uvec2(Wc * warpTileCoordS[1], 0);
+        uvec2 warpTileCoordShO  = uvec2(Wr * warpTileCoordS[0], 0);
+
+        // === Step 1: S = Q @ K^T ===
+        coopmat<C_TYPE, gl_ScopeSubgroup, lM, lK, gl_MatrixUseAccumulator> coopMatTilesO[Vr][Vd];
+        coopmat<S_TYPE, gl_ScopeSubgroup, lM, lN, gl_MatrixUseAccumulator> coopMatTilesS[Vr][Vc];
+        [[unroll]] for (int i = 0; i < Vr; i++)
+            [[unroll]] for (int j = 0; j < Vc; j++)
+                coopMatTilesS[i][j] = coopmat<S_TYPE, gl_ScopeSubgroup, lM, lN, gl_MatrixUseAccumulator>(S_TYPE(0.0));
+
+        barrier();
+
+        [[unroll]] for (uint coopMatI = 0; coopMatI < Vd; coopMatI++) {
+            coopmat<A_TYPE, gl_ScopeSubgroup, lK, lN, gl_MatrixUseB> matKt[Vc];
+            [[unroll]] for (uint coopMatC = 0; coopMatC < Vc; coopMatC++) {
+                uvec2 coord = warpTileCoordShKt + uvec2(coopMatI*lK, coopMatC*lN);
+                coopMatLoad(matKt[coopMatC], sharedKt,
+                    (coord[0] * strideSharedKt + coord[1]) / granularitySharedKt,
+                    strideSharedKt / granularitySharedKt,
+                    gl_CooperativeMatrixLayoutRowMajor);
+            }
+            coopmat<A_TYPE, gl_ScopeSubgroup, lM, lK, gl_MatrixUseA> matQ[Vr];
+            [[unroll]] for (uint coopMatR = 0; coopMatR < Vr; coopMatR++) {
+                uvec2 coord = warpTileCoordShQ + uvec2(coopMatR*lM, coopMatI*lK);
+                coopMatLoad(matQ[coopMatR], sharedQ,
+                    (coord[0] * strideSharedQ + coord[1]) / granularitySharedQ,
+                    strideSharedQ / granularitySharedQ,
+                    gl_CooperativeMatrixLayoutRowMajor);
+            }
+            [[unroll]] for (uint coopMatR = 0; coopMatR < Vr; coopMatR++)
+                [[unroll]] for (uint coopMatC = 0; coopMatC < Vc; coopMatC++)
+                    coopMatTilesS[coopMatR][coopMatC] = coopMatMulAdd(
+                        matQ[coopMatR], matKt[coopMatC], coopMatTilesS[coopMatR][coopMatC]);
+        }
+
+        [[unroll]] for (uint coopMatR = 0; coopMatR < Vr; coopMatR++)
+            [[unroll]] for (uint coopMatC = 0; coopMatC < Vc; coopMatC++) {
+                uvec2 coord = warpTileCoordShS + uvec2(coopMatR*lM, coopMatC*lN);
+                coopMatStore(S_TYPE(p.scale) * coopMatTilesS[coopMatR][coopMatC], sharedS,
+                    (coord[0] * strideSharedS + coord[1]) / granularitySharedS,
+                    strideSharedS / granularitySharedS,
+                    gl_CooperativeMatrixLayoutRowMajor);
+            }
+
+        barrier();
+
+        // === Step 2: Softmax ===
+        [[unroll]] for (int i = 0; i < nElemsOfBrPerInv; i++) {
+            uint rowIdBr = invId * nElemsOfBrPerInv + i;
+            if (rowIdBr < Br) {
+                S_TYPE rowMaxS = S_TYPE(-1.0/0.0);
+                [[unroll]] for (uint j = 0; j < Bc; j += granularitySharedS) {
+                    uint idx = (rowIdBr * strideSharedS + j) / granularitySharedS;
+                    fp16x4x2 uElem = fp16x4x2_unpackUvec4(sharedS[idx]);
+                    [[unroll]] for (int k = 0; k < 8; k++)
+                        // PATCH: mask out-of-bounds KV positions to -inf.
+                        // Reference assumes kv_seq_len % Bc == 0; MNN does not guarantee this.
+                        // Without masking, padding scores (Q@0=0) inflate li_j by ~Bc/valid_cols.
+                        rowMaxS = max(
+                            (kv_start + j + k < uint(p.kv_seq_len))
+                                ? uElem.values[k] : S_TYPE(-1.0/0.0),
+                            rowMaxS);
+                }
+                mi_j[i] = max(rowMaxS, mi_jm1[i]);
+
+                S_TYPE rowSumPijt = S_TYPE(0.0);
+                [[unroll]] for (uint j = 0; j < Bc; j += granularitySharedS) {
+                    uint idx = (rowIdBr * strideSharedS + j) / granularitySharedS;
+                    fp16x4x2 uElem = fp16x4x2_unpackUvec4(sharedS[idx]);
+                    [[unroll]] for (int k = 0; k < 8; k++) {
+                        uint col = j + k;
+                        S_TYPE e = (kv_start + col < uint(p.kv_seq_len))
+                            ? exp(uElem.values[k] - mi_j[i]) : S_TYPE(0.0);
+                        rowSumPijt += e;
+                        uElem.values[k] = e;
+                    }
+                    sharedS[idx] = fp16x4x2_packUvec4(uElem);
+                }
+
+                S_TYPE scaleFactor = exp(mi_jm1[i] - mi_j[i]);
+                li_j[i] = scaleFactor * li_jm1[i] + rowSumPijt;
+
+                [[unroll]] for (uint j = 0; j < D_HEAD; j += granularitySharedO) {
+                    uint idx = (rowIdBr * strideSharedO + j) / granularitySharedO;
+                    sharedO[idx] = fp16x4x2_packUvec4(
+                        mul(fp16x4x2_unpackUvec4(sharedO[idx]), scaleFactor));
+                }
+            }
+        }
+
+        barrier();
+
+        // === Step 3: O += P @ V ===
+        [[unroll]] for (uint coopMatR = 0; coopMatR < Vr; coopMatR++)
+            [[unroll]] for (uint coopMatC = 0; coopMatC < Vd; coopMatC++) {
+                uvec2 coord = warpTileCoordShO + uvec2(coopMatR*lM, coopMatC*lK);
+                coopMatLoad(coopMatTilesO[coopMatR][coopMatC], sharedO,
+                    (coord[0] * strideSharedO + coord[1]) / granularitySharedO,
+                    strideSharedO / granularitySharedO,
+                    gl_CooperativeMatrixLayoutRowMajor);
+            }
+
+        [[unroll]] for (uint coopMatI = 0; coopMatI < Vc; coopMatI++) {
+            coopmat<A_TYPE, gl_ScopeSubgroup, lM, lN, gl_MatrixUseA> matS[Vr];
+            [[unroll]] for (uint coopMatR = 0; coopMatR < Vr; coopMatR++) {
+                uvec2 coord = warpTileCoordShS + uvec2(coopMatR*lM, coopMatI*lN);
+                coopMatLoad(matS[coopMatR], sharedS,
+                    (coord[0] * strideSharedS + coord[1]) / granularitySharedS,
+                    strideSharedS / granularitySharedS,
+                    gl_CooperativeMatrixLayoutRowMajor);
+            }
+            coopmat<A_TYPE, gl_ScopeSubgroup, lN, lK, gl_MatrixUseB> matV[Vd];
+            [[unroll]] for (uint coopMatC = 0; coopMatC < Vd; coopMatC++) {
+                uvec2 coord = warpTileCoordShV + uvec2(coopMatI*lN, coopMatC*lK);
+                coopMatLoad(matV[coopMatC], sharedV,
+                    (coord[0] * strideSharedV + coord[1]) / granularitySharedV,
+                    strideSharedV / granularitySharedV,
+                    gl_CooperativeMatrixLayoutRowMajor);
+            }
+            [[unroll]] for (uint coopMatR = 0; coopMatR < Vr; coopMatR++)
+                [[unroll]] for (uint coopMatC = 0; coopMatC < Vd; coopMatC++)
+                    coopMatTilesO[coopMatR][coopMatC] = coopMatMulAdd(
+                        matS[coopMatR], matV[coopMatC], coopMatTilesO[coopMatR][coopMatC]);
+        }
+
+        [[unroll]] for (uint coopMatR = 0; coopMatR < Vr; coopMatR++)
+            [[unroll]] for (uint coopMatC = 0; coopMatC < Vd; coopMatC++) {
+                uvec2 coord = warpTileCoordShO + uvec2(coopMatR*lM, coopMatC*lK);
+                coopMatStore(coopMatTilesO[coopMatR][coopMatC], sharedO,
+                    (coord[0] * strideSharedO + coord[1]) / granularitySharedO,
+                    strideSharedO / granularitySharedO,
+                    gl_CooperativeMatrixLayoutRowMajor);
+            }
+
+        barrier();
+    }
+
+    // Finalize: normalize and write output
+    storeSharedO(q_start, base_Q, stride_Q, li_j[0]);
+}

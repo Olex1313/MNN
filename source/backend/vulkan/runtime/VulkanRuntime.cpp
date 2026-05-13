@@ -92,7 +92,7 @@ VulkanRuntime::VulkanRuntime(const Backend::Info& info, std::shared_ptr<VulkanDe
     };
     mFlops = 4.0f;//Default set as 4G, it will be larger than single-core cpu
     std::string deviceName = dev.proty().deviceName;
-    //FUNC_PRINT_ALL(deviceName.c_str(), s);
+    FUNC_PRINT_ALL(deviceName.c_str(), s);
     if (gFlopsMap.find(deviceName)!=gFlopsMap.end()) {
         mFlops = gFlopsMap[deviceName];
     }
@@ -118,6 +118,7 @@ VulkanRuntime::VulkanRuntime(const Backend::Info& info, std::shared_ptr<VulkanDe
     std::vector<int> legalModeValues = {0x00000001, 0x00000002, 0x00000004,
                                         0x00000201, 0x00000202, 0x00000204};
     auto iter = std::find(legalModeValues.begin(), legalModeValues.end(), (uint32_t)mInfo.gpuMode);
+    MNN_PRINT("GPU MODE: %d\n", mInfo.gpuMode);
     if (iter == legalModeValues.end()) {
         MNN_PRINT("The customized gpu mode is illegal for Vulkan backend. Using the default mode.\n");
         mGpuMode = 0x00000004;

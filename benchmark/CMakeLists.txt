@@ -42,7 +42,7 @@ target_include_directories(benchmarkAttention.out PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/opencl/core
     ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/opencl
 )
-target_link_libraries(benchmarkAttention.out ${MNN_DEPS})
+target_link_libraries(benchmarkAttention.out ${MNN_DEPS} ${MNN_OBJECTS_TO_LINK})
 
 if (MSVC AND NOT MNN_BUILD_SHARED_LIBS)
   foreach (DEPEND ${MNN_DEPS})

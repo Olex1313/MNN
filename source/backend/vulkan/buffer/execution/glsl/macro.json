@@ -3,6 +3,12 @@
         "D_HEAD_64",
         "D_HEAD_128"
     ],
+    "sdpa_flash_coopmat_mnn.comp": [
+        "D_HEAD_64",
+        "D_HEAD_128",
+        "D_HEAD_64_OPT",
+        "D_HEAD_128_OPT"
+    ],
     "blit.comp":[
         "C4"
     ],

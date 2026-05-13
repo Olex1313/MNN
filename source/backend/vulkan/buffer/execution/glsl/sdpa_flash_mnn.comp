@@ -9,11 +9,13 @@
   #define D_HEAD 128
 #endif
 
+// THREADS_PER_ROW and D_SLICE are compile-time because they size O_acc[].
+// They must satisfy: BLOCK_M * THREADS_PER_ROW == local_size_x (passed from C++).
+// Loop strides use gl_WorkGroupSize.x so they track the specialization constant directly.
 #define BLOCK_M         32
 #define BLOCK_N         32
-#define THREADS_PER_ROW 4
-#define D_SLICE         (D_HEAD / THREADS_PER_ROW)
-#define WG_SIZE         (BLOCK_M * THREADS_PER_ROW)
+#define THREADS_PER_ROW 1
+#define D_SLICE         D_HEAD
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
@@ -57,7 +59,7 @@ void main() {
     int base_K = batch_id * p.kv_seq_len * stride_kv + kv_head_id * p.head_dim;
 
     // Load Q tile into shared memory
-    for (int i = tid; i < q_rows * D_HEAD; i += WG_SIZE) {
+    for (int i = tid; i < q_rows * D_HEAD; i += int(gl_WorkGroupSize.x)) {
         int r = i / D_HEAD, d = i % D_HEAD;
         Q_tile[r * D_HEAD + d] = Q[base_Q + (q_start + r) * stride_q + d];
     }
@@ -76,7 +78,7 @@ void main() {
         int kv_rows  = kv_end - kv_start;
 
         // Load K tile.
-        for (int i = tid; i < kv_rows * D_HEAD; i += WG_SIZE) {
+        for (int i = tid; i < kv_rows * D_HEAD; i += int(gl_WorkGroupSize.x)) {
             int r = i / D_HEAD, d = i % D_HEAD;
             KV_tile[r * D_HEAD + d] = K[base_K + (kv_start + r) * stride_kv + d];
         }
@@ -110,7 +112,7 @@ void main() {
         barrier();
 
         // Load V tile (reuse KV_tile)
-        for (int i = tid; i < kv_rows * D_HEAD; i += WG_SIZE) {
+        for (int i = tid; i < kv_rows * D_HEAD; i += int(gl_WorkGroupSize.x)) {
             int r = i / D_HEAD, d = i % D_HEAD;
             KV_tile[r * D_HEAD + d] = V[base_K + (kv_start + r) * stride_kv + d];
         }

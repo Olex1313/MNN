@@ -178,6 +178,10 @@ public:
         return mSubgroupSize;
     }
 
+    bool hasCooperativeMatrix() const {
+        return mHasCooperativeMatrix;
+    }
+
 private:
     const VkResult enumerateDeviceExtensionProperties(const VkPhysicalDevice& dev,
                                                       std::vector<VkExtensionProperties>& exts_props) const;
@@ -193,6 +197,7 @@ private:
     VkPhysicalDeviceMemoryProperties mMemoryProty;
     uint32_t mSubgroupSize;
     uint32_t mLocalMemorySize = 0;
+    bool mHasCooperativeMatrix = false;
 };
 } // namespace MNN
 #endif /* VulkanDevice_hpp */

@@ -28,6 +28,7 @@ struct BenchCase {
     int num_head;
     int head_dim;
     bool use_flash;
+    int impl_type; // 0=AUTO, 1=SIMPLE, 2=COOP_MAT for vulkan
 };
 
 static void fillRandom(float* ptr, int size) {
@@ -47,8 +48,8 @@ static void flushGPU(const Backend* backend, MNNForwardType forward) {
 }
 
 static void benchAttention(const BenchCase& c, const ScheduleConfig& config,
-                           MNNForwardType forward, int warmup, int loop) {
-    const char* tag = c.use_flash ? "flash" : "native";
+                           int warmup, int loop) {
+    const char* tag = !c.use_flash ? "native" : (c.impl_type == 2 ? "coopmat" : "flash");
     MNN_PRINT("%-7s  B=%d  seq=%4d  H=%2d  D=%3d  \n", tag, c.batch, c.seq_len, c.num_head, c.head_dim);
 
     std::shared_ptr<OpT> attention(new OpT);
@@ -57,6 +58,7 @@ static void benchAttention(const BenchCase& c, const ScheduleConfig& config,
     attention->main.value = new AttentionParamT;
     attention->main.AsAttentionParam()->kv_cache = false;
     attention->main.AsAttentionParam()->flash_attn_kernel = c.use_flash;
+    attention->main.AsAttentionParam()->impl_type = c.impl_type;
 
     auto Q = _Input({c.batch, c.seq_len, c.num_head, c.head_dim}, NCHW);
     auto K = _Input({c.batch, c.seq_len, c.num_head, c.head_dim}, NCHW);
@@ -110,7 +112,7 @@ static void benchAttention(const BenchCase& c, const ScheduleConfig& config,
 
         auto t0 = steady_clock::now();
         net->runSession(session);
-        flushGPU(backend, forward);
+        flushGPU(backend, config.type);
         auto t1 = steady_clock::now();
 
         float us = std::chrono::duration<float, std::micro>(t1 - t0).count();
@@ -173,19 +175,46 @@ int main(int argc, const char* argv[]) {
               forward, loop, warmup, deviceId);
 
     std::vector<BenchCase> cases;
-    std::vector<int> batches   = {4};
-    std::vector<int> seqlens   = {4096, 8192, 16384};
-    std::vector<int> num_heads = {4};
-    std::vector<int> headdims  = {64};
-    for (auto batch : batches)
-        for (auto seq : seqlens)
-            for (auto heads : num_heads)
-                for (auto hd : headdims) {
-                    cases.push_back({batch, seq, heads, hd, true});
-                    if (seq <= 8192 && forward == MNN_FORWARD_OPENCL)
-                        cases.push_back({batch, seq, heads, hd, false});
-                }
-
-    for (auto& c : cases)
-        benchAttention(c, config, forward, warmup, loop);
+    struct Cfg { int B, H, S, D; };
+    std::vector<Cfg> cfgs = {
+        // Increasing seqlen — main scaling axis (reference frontend: B=4,H=8)
+        // {4, 8, 1024,  64},
+        // {4, 8, 2048,  64},
+        // {4, 8, 4096,  64},
+        // {4, 8, 8192,  64},
+        // {4, 8, 16384, 64},
+        // {4, 8, 32768, 64},
+        // D=128
+        {4, 8, 1024, 128},
+        {4, 8, 2048, 128},
+        {4, 8, 4096, 128},
+        // {4, 8, 8192,  128},
+        // {4, 8, 16384,  128},
+        // {4, 8, 32768,  128},
+        // More heads
+        // {4, 16, 2048, 64},
+        // {4, 32, 2048, 64},
+        // // More batch
+        // {8,  8, 2048, 64},
+        // {16, 8, 2048, 64},
+    };
+    for (auto& g : cfgs) {
+        BenchCase flash{g.B, g.S, g.H, g.D, true, 1};
+        cases.push_back(flash);
+        // OpenCL native (no flash) OOMs above 8192 skip for now
+        if (forward == MNN_FORWARD_OPENCL && g.S <= 8192) {
+            BenchCase native = flash;
+            native.use_flash = false;
+            cases.push_back(native);
+        }
+        if (forward == MNN_FORWARD_VULKAN) {
+            BenchCase coopmat = flash;
+            coopmat.impl_type = 2;
+            cases.push_back(coopmat);
+        }
+    }
+    
+    for (auto& c : cases) {
+        benchAttention(c, config, warmup, loop);
+    }
 }

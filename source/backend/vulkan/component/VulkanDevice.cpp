@@ -103,18 +103,40 @@ VulkanDevice::VulkanDevice(std::shared_ptr<VulkanInstance> instance)
         }
     }
 
-    VkDeviceCreateInfo deviceCreateInfo{
-        /* .sType                   = */ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        /* .pNext                   = */ nullptr,
-        /* .flags                   = */ 0,
-        /* .queueCreateInfoCount    = */ 1,
-        /* .pQueueCreateInfos       = */ &queueCreateInfo,
-        /* .enabledLayerCount       = */ 0,
-        /* .ppEnabledLayerNames     = */ nullptr,
-        /* .enabledExtensionCount   = */ static_cast<uint32_t>(deviceExtensions.size()),
-        /* .ppEnabledExtensionNames = */ deviceExtensions.data(),
-        /* .pEnabledFeatures        = */ &mDeviceFeature,
-    };
+    // Check for cooperative matrix extension (VK_KHR_cooperative_matrix, Vulkan 1.3+).
+    bool coopMatAvailable = false;
+#ifdef VK_KHR_cooperative_matrix
+    for (uint32_t i = 0; i < availableDeviceExtensionCount; i++) {
+        if (strcmp(availableDeviceExtensions[i].extensionName,
+                   VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) == 0) {
+            deviceExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+            coopMatAvailable = true;
+            break;
+        }
+    }
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopMatFeatures = {};
+    if (coopMatAvailable) {
+        coopMatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+        coopMatFeatures.cooperativeMatrix = VK_TRUE;
+    }
+#endif
+
+    VkDeviceCreateInfo deviceCreateInfo = {};
+    deviceCreateInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+#ifdef VK_KHR_cooperative_matrix
+    deviceCreateInfo.pNext                   = coopMatAvailable ? &coopMatFeatures : nullptr;
+#else
+    deviceCreateInfo.pNext                   = nullptr;
+#endif
+    deviceCreateInfo.flags                   = 0;
+    deviceCreateInfo.queueCreateInfoCount    = 1;
+    deviceCreateInfo.pQueueCreateInfos       = &queueCreateInfo;
+    deviceCreateInfo.enabledLayerCount       = 0;
+    deviceCreateInfo.ppEnabledLayerNames     = nullptr;
+    deviceCreateInfo.enabledExtensionCount   = static_cast<uint32_t>(deviceExtensions.size());
+    deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
+    deviceCreateInfo.pEnabledFeatures        = &mDeviceFeature;
+
     mDevice = VK_NULL_HANDLE;
     CALL_VK(vkCreateDevice(mPhysicalDevice, &deviceCreateInfo, nullptr, &mDevice));
     if (VK_NULL_HANDLE == mDevice) {
@@ -125,6 +147,7 @@ VulkanDevice::VulkanDevice(std::shared_ptr<VulkanInstance> instance)
     vkGetPhysicalDeviceMemoryProperties(mPhysicalDevice, &mMemoryProty);
     mLocalMemorySize = _getLocalMemorySize(mMemoryProty);
     getDeviceQueue(mQueueFamilyIndex, 0, mQueue);
+    mHasCooperativeMatrix = coopMatAvailable && (VK_NULL_HANDLE != mDevice);
 
     // query subgroupSize
     {
