@@ -1,7 +1,20 @@
 #version 450 core
 // Plain Flash Attention v2 (no mask, no causal) for MNN Vulkan buffer backend.
 // Shared memory: Q_tile[BLOCK_M*D_HEAD] + KV_tile[BLOCK_N*D_HEAD]
-// = (32+32)*128*4 = 32KB (D_HEAD_128) or (32+32)*64*4 = 16KB (D_HEAD_64)
+
+// Combined D_HEAD + tile variants for pre-compiled shaders.
+// D_HEAD_64_SMALL / D_HEAD_128_SMALL: reduced tile for tight shmem.
+#ifdef D_HEAD_64_SMALL
+  #define D_HEAD_64
+  #define BLOCK_M         32
+  #define BLOCK_N         32
+  #define THREADS_PER_ROW 4
+#endif
+#ifdef D_HEAD_128_SMALL
+  #define BLOCK_M         32
+  #define BLOCK_N         32
+  #define THREADS_PER_ROW 4
+#endif
 
 #ifdef D_HEAD_64
   #define D_HEAD 64
@@ -9,13 +22,18 @@
   #define D_HEAD 128
 #endif
 
-// THREADS_PER_ROW and D_SLICE are compile-time because they size O_acc[].
-// They must satisfy: BLOCK_M * THREADS_PER_ROW == local_size_x (passed from C++).
-// Loop strides use gl_WorkGroupSize.x so they track the specialization constant directly.
-#define BLOCK_M         32
-#define BLOCK_N         32
-#define THREADS_PER_ROW 1
-#define D_SLICE         D_HEAD
+#ifndef BLOCK_M
+  #define BLOCK_M 64
+#endif
+#ifndef BLOCK_N
+  #define BLOCK_N 32
+#endif
+#ifndef THREADS_PER_ROW
+  #define THREADS_PER_ROW 2
+#endif
+#define D_SLICE         (D_HEAD / THREADS_PER_ROW)
+#define D_SLICE_VEC4    (D_SLICE / 4)
+#define D_HEAD_VEC4     (D_HEAD / 4)
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
@@ -67,8 +85,8 @@ void main() {
 
     float m_i = uintBitsToFloat(0xFF800000u); // -inf
     float l_i = 0.0;
-    float O_acc[D_SLICE];
-    for (int d = 0; d < D_SLICE; d++) O_acc[d] = 0.0;
+    vec4 O_acc4[D_SLICE_VEC4];
+    for (int d = 0; d < D_SLICE_VEC4; d++) O_acc4[d] = vec4(0.0);
     float scores[BLOCK_N];
 
     int num_kv_blocks = (p.kv_seq_len + BLOCK_N - 1) / BLOCK_N;
@@ -77,20 +95,27 @@ void main() {
         int kv_end   = min(kv_start + BLOCK_N, p.kv_seq_len);
         int kv_rows  = kv_end - kv_start;
 
-        // Load K tile.
+        // Load K tile
         for (int i = tid; i < kv_rows * D_HEAD; i += int(gl_WorkGroupSize.x)) {
             int r = i / D_HEAD, d = i % D_HEAD;
             KV_tile[r * D_HEAD + d] = K[base_K + (kv_start + r) * stride_kv + d];
         }
         barrier();
 
-        // Compute scores = Q @ K^T * scale.
-        float m_block = uintBitsToFloat(0xFF800000u); // hack around 1/0 == inf
+        // Compute scores = Q @ K^T * scale (vec4 dot products from shared mem)
+        float m_block = uintBitsToFloat(0xFF800000u);
         if (row_id < q_rows) {
             for (int j = 0; j < kv_rows; j++) {
                 float s = 0.0;
-                for (int d = 0; d < D_HEAD; d++)
-                    s += Q_tile[row_id * D_HEAD + d] * KV_tile[j * D_HEAD + d];
+                int q_off = row_id * D_HEAD;
+                int k_off = j * D_HEAD;
+                for (int d = 0; d < D_HEAD_VEC4; d++) {
+                    vec4 qv = vec4(Q_tile[q_off + d*4], Q_tile[q_off + d*4+1],
+                                   Q_tile[q_off + d*4+2], Q_tile[q_off + d*4+3]);
+                    vec4 kv = vec4(KV_tile[k_off + d*4], KV_tile[k_off + d*4+1],
+                                   KV_tile[k_off + d*4+2], KV_tile[k_off + d*4+3]);
+                    s += dot(qv, kv);
+                }
                 scores[j] = s * p.scale;
                 m_block = max(m_block, scores[j]);
             }
@@ -100,7 +125,7 @@ void main() {
         if (row_id < q_rows) {
             float m_new = max(m_i, m_block);
             float alpha = exp(m_i - m_new);
-            for (int d = 0; d < D_SLICE; d++) O_acc[d] *= alpha;
+            for (int d = 0; d < D_SLICE_VEC4; d++) O_acc4[d] *= alpha;
             float block_l = 0.0;
             for (int j = 0; j < kv_rows; j++) {
                 scores[j] = exp(scores[j] - m_new);
@@ -118,11 +143,15 @@ void main() {
         }
         barrier();
 
-        // Accumulate P @ V
+        // Accumulate P @ V (vec4 from shared mem)
         if (row_id < q_rows) {
             for (int j = 0; j < kv_rows; j++) {
-                for (int d = 0; d < D_SLICE; d++)
-                    O_acc[d] += scores[j] * KV_tile[j * D_HEAD + d_start + d];
+                float e = scores[j];
+                int v_off = j * D_HEAD + d_start;
+                for (int d = 0; d < D_SLICE_VEC4; d++) {
+                    O_acc4[d] += e * vec4(KV_tile[v_off + d*4], KV_tile[v_off + d*4+1],
+                                          KV_tile[v_off + d*4+2], KV_tile[v_off + d*4+3]);
+                }
             }
         }
         barrier();
@@ -130,9 +159,14 @@ void main() {
 
     // Normalize and write output
     if (row_id < q_rows) {
-        int out_base = base_Q + (q_start + row_id) * stride_q + d_start;
         float inv_l = 1.0 / l_i;
-        for (int d = 0; d < D_SLICE; d++)
-            O[out_base + d] = O_acc[d] * inv_l;
+        int out_base = base_Q + (q_start + row_id) * stride_q + d_start;
+        for (int d = 0; d < D_SLICE_VEC4; d++) {
+            vec4 v = O_acc4[d] * inv_l;
+            O[out_base + d*4 + 0] = v.x;
+            O[out_base + d*4 + 1] = v.y;
+            O[out_base + d*4 + 2] = v.z;
+            O[out_base + d*4 + 3] = v.w;
+        }
     }
 }

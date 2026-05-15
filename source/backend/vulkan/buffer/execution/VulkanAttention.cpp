@@ -28,16 +28,17 @@ struct AttentionParams {
     float scale;
 };
 
-// Keep block_m * threads_per_row <= 256 and
-// (block_m + block_n) * head_dim * 4 bytes <= 32 KB shared memory.
-static constexpr int BLOCK_M = 32;
-static constexpr int BLOCK_N = 32;
-static constexpr int THREADS_PER_ROW = 1;  // splits head_dim across threads, tuned in 1-2-4, 1 is better with vk
-static constexpr int LOCAL_SIZE_X = BLOCK_M * THREADS_PER_ROW;
+// Tile configs tried in order; first that fits device shmem wins.
+// (block_m + block_n) * head_dim * 4 bytes must fit shared memory.
+struct TileConfig { int blockM, blockN, tpr; };
+static constexpr TileConfig kTileConfigs[] = {
+    {64, 32, 2},   // prefer larger Q tile
+    {32, 32, 4},   // fallback for tight shmem (e.g. D=128 on 32KB devices)
+};
 
 // Cooperative matrix shader uses 32 threads (one full subgroup).
-// The simple fallback shader uses LOCAL_SIZE_X (also 32 with THREADS_PER_ROW=1).
 static constexpr int COOP_MAT_LOCAL_SIZE_X = 32;
+static constexpr int COOP_MAT_BLOCK_M = 32;
 
 // impl_type values — must match the MNN.fbs schema field.
 enum AttentionImplType {
@@ -79,7 +80,6 @@ public:
 
         std::string shaderName;
         uint32_t localSizeX;
-        int blockM;
         if (useCoopMat) {
             // Use default variants (Vr=2,Vc=2,Ur=1,Br=32) — OPT variants (Ur=4) have a
             // correctness issue under investigation (wrong output at q_block boundaries).
@@ -87,19 +87,32 @@ public:
                 ? "glsl_sdpa_flash_coopmat_mnn_D_HEAD_64_comp"
                 : "glsl_sdpa_flash_coopmat_mnn_D_HEAD_128_comp";
             localSizeX = COOP_MAT_LOCAL_SIZE_X;
-            blockM     = BLOCK_M;
+            mBlockM    = COOP_MAT_BLOCK_M;
         } else {
-            if (headDim == 64) {
-                shaderName = "glsl_sdpa_flash_mnn_D_HEAD_64_comp";
-            } else if (headDim == 128) {
-                shaderName = "glsl_sdpa_flash_mnn_D_HEAD_128_comp";
-            } else {
-                return false;
+            if (headDim != 64 && headDim != 128) return false;
+
+            // Select tile config that fits device shared memory
+            size_t maxShmem = vkBn->proty().limits.maxComputeSharedMemorySize;
+
+            TileConfig tile = {0, 0, 0};
+            for (auto& cfg : kTileConfigs) {
+                size_t need = (size_t)(cfg.blockM + cfg.blockN) * headDim * sizeof(float);
+                if (need <= maxShmem) { tile = cfg; break; }
             }
-            localSizeX = LOCAL_SIZE_X;
-            blockM     = BLOCK_M;
+            if (tile.blockM == 0) return false;
+
+            // Pick shader variant: D_HEAD_{64,128} x {large, SMALL} tile
+            bool small = (tile.blockM == 32);
+            if (headDim == 64) {
+                shaderName = small ? "glsl_sdpa_flash_mnn_D_HEAD_64_SMALL_comp"
+                                   : "glsl_sdpa_flash_mnn_D_HEAD_64_comp";
+            } else {
+                shaderName = small ? "glsl_sdpa_flash_mnn_D_HEAD_128_SMALL_comp"
+                                   : "glsl_sdpa_flash_mnn_D_HEAD_128_comp";
+            }
+            localSizeX = (uint32_t)(tile.blockM * tile.tpr);
+            mBlockM    = tile.blockM;
         }
-        mBlockM = blockM;
 
         mPipeline = vkBn->getPipeline(shaderName, {
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -168,7 +181,7 @@ public:
 private:
     bool mKVCache;
     int  mImplType;
-    int  mBlockM = BLOCK_M;
+    int  mBlockM = 32;
     const VulkanPipeline* mPipeline = nullptr;
     std::shared_ptr<VulkanLayout::DescriptorSet> mDescriptorSet;
     std::shared_ptr<VulkanBuffer> mParam;

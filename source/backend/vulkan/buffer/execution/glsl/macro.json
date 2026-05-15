@@ -1,7 +1,9 @@
 {
     "sdpa_flash_mnn.comp": [
         "D_HEAD_64",
-        "D_HEAD_128"
+        "D_HEAD_128",
+        "D_HEAD_64_SMALL",
+        "D_HEAD_128_SMALL"
     ],
     "sdpa_flash_coopmat_mnn.comp": [
         "D_HEAD_64",
